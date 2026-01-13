@@ -37,8 +37,8 @@ log_mass<-log(MouseMeasurements$mass_g)
 log_mass                                   #Natural Log of the mice weights
 
 
-geo_m<-((mean(Fl)*mean(Fdw)*mean(Fsw)*mean(Tl)*mean(Tpw)*mean(Tmw)*mean(Hl)*mean(Hdw)*mean(Hpw)*mean(Hsw)*mean(Ul)*mean(Uol)*mean(Usw)*mean(Rl)*mean(Mcl)*mean(Ppl)*mean(Mtl)*mean(Pppl))^(1/18))
-geo_m                                      #Geometric Mean of the 18 measurements, 3.736719
+geo_m<-((Fl*Fdw*Fsw*Tl*Tpw*Tmw*Hl*Hdw*Hpw*Hsw*Ul*Uol*Usw*Rl*Mcl*Ppl*Mtl*Pppl)^(1/18))
+geo_m                                      #Geometric Mean of the 18 measurements
 
 
 
@@ -70,3 +70,4 @@ ggplot(data=MouseMeasurements,aes(x=HPI,y=genus_species))+geom_point()
 #Plot 3 - PES by Species
 
 ggplot(data=MouseMeasurements,aes(x=PES,y=genus_species))+geom_point()
+
