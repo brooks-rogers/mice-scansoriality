@@ -1,6 +1,6 @@
 ---
 title: "Data Wrangle"
-output: html_notebook
+#output: html_notebook
 ---
 
 # Data Wrangle
