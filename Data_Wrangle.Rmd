@@ -1,0 +1,131 @@
+---
+title: "Data Wrangle"
+output: html_notebook
+---
+
+# Data Wrangle
+
+This notebook is for wrangling the data for subsequent analyses. This includes calculating functional indices, geometric means, log mass, etc. 
+
+```{r}
+#install.packages('tidyverse', 'here')
+library(tidyverse)
+library(here)
+#this sets the working directory by telling it that the dir is the one containing "README.md"
+#this way we can easily use different working directories between our machines.
+here::i_am("README.md")
+#this function will be used to scale variables to a mean of 0 and a standard deviation of 1
+scale2 <- function(x, na.rm = FALSE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm)
+```
+
+## Load Data 
+
+`read_csv` of the `readr` package reads in a dataframe as a tibble. 
+```{r}
+dat <- read_csv("MouseMeasurements.csv") |> 
+  #this selects all columns from `catalog` to `Date`, removing the last ones
+  select(catalog:Date)
+```
+## Wrangle Data
+
+I'll use your previous code to generate the indices, calculate geometric means, etc. But I'll do it all in one command, and by appending lines to the dataframe.
+`mutate` creates a new varaible in the dataframe, but leaves the others untouched. 
+```{r}
+dat <- dat |> 
+  mutate(
+    MANUS = Ppl/Mcl,      #MANUS Index
+    HRI = Hsw/Hl,         #Humeral Robustness Index
+    HPI = Hpw/Hl,         #Humeral Proximal Index
+    HEB = Hdw/Hl,         #Humeral Epicondyle Breadth
+    OLI = Uol/Ul,         #Olecranon Process Length Index
+    BI = Rl/Hl,            #Brachial Index
+    IM = (Hl+Ul)/(Fl+Tl), #Intermembral Index
+    PRTI = Mcl/(Hl+Rl),   #Palm Robustness Index
+    FRI = Fsw/Fl,         #Femoral Robustness
+    FEB = Fdw/Fl,         #Femoral Epicondyle Breadth
+    CI = Tl/Fl,           #Crural Index
+    TRI = Tmw/Tl,         #Tibial Robustness Index
+    PES = Pppl/Mtl,       #PES Index
+    #geometric Mean
+    gm = ((Fl*Fdw*Fsw*Tl*Tpw*Tmw*Hl*Hdw*Hpw*Hsw*Ul*Uol*Usw*Rl*Mcl*Ppl*Mtl*Pppl)^(1/18)),
+    #log mass
+    logmass = log(mass_g)
+        ) 
+```
+
+## Preliminary Plots
+Using the data to make some prelim plots
+Adding the mean of each species to the plots
+
+MANUS
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_MANUS = mean(MANUS, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = MANUS, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_MANUS), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "MANUS") +
+  theme_bw()
+```
+HPI
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_HPI = mean(HPI, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = HPI, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_HPI), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "HPI") +
+  theme_bw()
+```
+
+OLI
+
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_OLI = mean(OLI, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = OLI, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_OLI), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "OLI") +
+  theme_bw()
+```
+
+PES
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_PES = mean(PES, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = PES, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_PES), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "PES") +
+  theme_bw()
+```
+
