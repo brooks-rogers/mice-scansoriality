@@ -1,0 +1,89 @@
+---
+title: "MouseAnalysis"
+author: "Brooks Rogers"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+```{r, message=FALSE}
+library(tidyverse)
+
+library(ggplot2)
+```
+
+## Loading CSV
+```{r}
+MouseMeasurements<-read.csv("MouseMeasurements.csv",header=TRUE)
+```
+
+## Creating Linear Measurement Objects
+```{r}
+Fl<-MouseMeasurements$Fl[!is.na(MouseMeasurements$Fl)]       #Femur Length
+Fdw<-MouseMeasurements$Fdw[!is.na(MouseMeasurements$Fdw)]    #Femur Distal Width
+Fsw<-MouseMeasurements$Fsw[!is.na(MouseMeasurements$Fsw)]    #Femur Shaft Width
+Tl<-MouseMeasurements$Tl[!is.na(MouseMeasurements$Tl)]       #Tibia Length
+Tpw<-MouseMeasurements$Tpw[!is.na(MouseMeasurements$Tpw)]    #Tibia Proximal Width
+Tmw<-MouseMeasurements$Tmw[!is.na(MouseMeasurements$Tmw)]    #Tibia Mid-Shaft Width
+Hl<-MouseMeasurements$Hl[!is.na(MouseMeasurements$Hl)]       #Humerus Length
+Hdw<-MouseMeasurements$Hdw[!is.na(MouseMeasurements$Hdw)]    #Humerus Distal Width
+Hpw<-MouseMeasurements$Hpw[!is.na(MouseMeasurements$Hpw)]    #Humerus Proximal Width
+Hsw<-MouseMeasurements$Hsw[!is.na(MouseMeasurements$Hsw)]    #Humerus Shaft Width
+Ul<-MouseMeasurements$Ul[!is.na(MouseMeasurements$Ul)]       #Ulna Length
+Uol<-MouseMeasurements$Uol[!is.na(MouseMeasurements$Uol)]    #Olecranon Process Length
+Usw<-MouseMeasurements$Usw[!is.na(MouseMeasurements$Usw)]    #Ulna Shaft Width
+Rl<-MouseMeasurements$Rl[!is.na(MouseMeasurements$Rl)]       #Radius Length
+Mcl<-MouseMeasurements$Mcl[!is.na(MouseMeasurements$Mcl)]    #Metacarpal Length
+Ppl<-MouseMeasurements$Ppl[!is.na(MouseMeasurements$Ppl)]    #Proximal Phalanx III Length
+Mtl<-MouseMeasurements$Mtl[!is.na(MouseMeasurements$Mtl)]    #Metatarsal Length
+Pppl<-MouseMeasurements$Pppl[!is.na(MouseMeasurements$Pppl)] #Proximal Phalanx III Length PES
+```
+
+## Converting to Logarithmic Mass
+```{r}
+log_mass<-log(MouseMeasurements$mass_g)
+```
+
+## Calculating Geometric Mean for Each Specimen
+```{r,warning=FALSE}
+geo_m<-((Fl*Fdw*Fsw*Tl*Tpw*Tmw*Hl*Hdw*Hpw*Hsw*Ul*Uol*Usw*Rl*Mcl*Ppl*Mtl*Pppl)^(1/18))
+```
+
+## Creating Objects for the Indices of Significance
+```{r,warning=FALSE}
+MANUS<-Ppl/Mcl      #MANUS Index
+HRI<-Hsw/Hl         #Humeral Robustness Index
+HPI<-Hpw/Hl         #Humeral Proximal Index
+HEB<-Hdw/Hl         #Humeral Epicondyle Breadth
+OLI<-Uol/Ul         #Olecranon Process Length Index
+BI<-Rl/Hl           #Brachial Index
+IM<-(Hl+Ul)/(Fl+Tl) #Intermembral Index
+PRTI<-Mcl/(Hl+Rl)   #Palm Robustness Index
+FRI<-Fsw/Fl         #Femoral Robustness
+FEB<-Fdw/Fl         #Femoral Epicondyle Breadth
+CI<-Tl/Fl           #Crural Index
+TRI<-Tmw/Tl         #Tibial Robustness Index
+PES<-Pppl/Mtl       #PES Index
+```
+## Preliminary Plots
+
+### Plot 1 - MANUS by Species
+```{r,echo=FALSE}
+ggplot(data=MouseMeasurements,aes(x=MANUS,y=genus_species))+geom_point()
+```
+
+### Plot 2 - HPI by Species
+```{r,echo=FALSE}
+ggplot(data=MouseMeasurements,aes(x=HPI,y=genus_species))+geom_point()
+```
+
+### Plot 3 - PES by Species
+```{r,echo=FALSE}
+ggplot(data=MouseMeasurements,aes(x=PES,y=genus_species))+geom_point()
+
+```
+
