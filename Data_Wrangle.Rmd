@@ -49,7 +49,7 @@ dat <- dat |>
     #geometric Mean
     gm = ((Fl*Fdw*Fsw*Tl*Tpw*Tmw*Hl*Hdw*Hpw*Hsw*Ul*Uol*Usw*Rl*Mcl*Ppl*Mtl*Pppl)^(1/18)),
     #log mass
-    logmass = log(mass_g)
+    log_Mass = log(mass_g)
         ) 
 ```
 
