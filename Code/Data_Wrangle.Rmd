@@ -1,0 +1,219 @@
+---
+title: "Data Wrangle"
+#output: html_notebook
+---
+
+# Data Wrangle
+
+This notebook is for wrangling the data for subsequent analyses. This includes calculating functional indices, geometric means, log mass, etc. 
+
+```{r}
+#install.packages('tidyverse', 'here')
+library(tidyverse)
+library(here)
+#this sets the working directory by telling it that the dir is the one containing "README.md"
+#this way we can easily use different working directories between our machines.
+here::i_am("README.md")
+#this function will be used to scale variables to a mean of 0 and a standard deviation of 1
+scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+```
+
+## Load and Wrangle Data
+
+`read_csv` of the `readr` package reads in a dataframe as a tibble. 
+
+I'll use your previous code to generate the indices, calculate geometric means, etc. But I'll do it all in one command, and by appending lines to the dataframe.
+`mutate` creates a new varaible in the dataframe, but leaves the others untouched. 
+```{r}
+dat <-  read_csv(here("Data", "MouseMeasurements.csv")) |> 
+  #this selects all columns from `catalog` to `Date`, removing the last ones
+  select(catalog:Pppl) |> 
+  # Make indices
+  mutate(
+    MANUS = Ppl/Mcl,      #MANUS Index
+    HRI = Hsw/Hl,         #Humeral Robustness Index
+    HPI = Hpw/Hl,         #Humeral Proximal Index
+    HEB = Hdw/Hl,         #Humeral Epicondyle Breadth
+    OLI = Uol/Ul,         #Olecranon Process Length Index
+    BI = Rl/Hl,            #Brachial Index
+    IM = (Hl+Ul)/(Fl+Tl), #Intermembral Index
+    PRTI = Mcl/(Hl+Rl),   #Palm Robustness Index
+    FRI = Fsw/Fl,         #Femoral Robustness
+    FEB = Fdw/Fl,         #Femoral Epicondyle Breadth
+    CI = Tl/Fl,           #Crural Index
+    TRI = Tmw/Tl,         #Tibial Robustness Index
+    PES = Pppl/Mtl,       #PES Index
+    #Skipping geometric Mean
+    #log mass
+    log_Mass = log(mass_g)
+        ) |> 
+  #log transforms all linear variables
+  mutate_at(vars(Fl:Pppl), log) |> 
+  #creates a new column telling us this is the prediciton data
+  mutate(pred_data = "T") |> 
+  #removes this measurement
+  select(!Usw)
+```
+
+## Load in Training data
+This is the raw extant data for predictions
+Some rows will need to be dropped and added. 
+
+```{r}
+tdat <- read_csv(here("Data", "Raw_Extant_Data.csv"), na = c("NA", "?", ""))|> 
+   mutate(Loc_Ord = case_when(Loc_mode_Ordinal == "G"  ~ "G",
+                             Loc_mode_Ordinal == "A"  ~ "A",
+                             Loc_mode_Ordinal == "Sc" ~ "Sc",
+                             Loc_mode_Ordinal == "T"  ~ "T",
+                             Loc_mode_Ordinal == "Is" ~ "Is",
+                             Loc_mode_Ordinal == "Sf" ~ "Sf",
+                             Loc_mode_Ordinal == "Ss" ~ "Ss",
+                             TRUE ~ NA),
+         Loc_Ord = as.ordered(Loc_Ord),
+         Loc_Ord = fct_relevel(Loc_Ord, c("G","A","Sc","T","Is","Sf","Ss")),
+         # Combining the Intersurface and Semifossorial
+         Loc_Ord2 = case_when(Loc_mode_Ordinal == "G" ~ "A",
+                              Loc_mode_Ordinal == "A" ~ "A",
+                              Loc_mode_Ordinal == "Sc" ~ "Sc",
+                              Loc_mode_Ordinal == "T" ~ "T",
+                              Loc_mode_Ordinal == "Is" ~ "B",
+                              Loc_mode_Ordinal == "Sf" ~ "B",
+                              Loc_mode_Ordinal == "Ss" ~ "B",
+                             TRUE ~ NA),
+         Loc_Ord2 = as.ordered(Loc_Ord2),
+         Loc_Ord2 = fct_relevel(Loc_Ord2, c("B","T","Sc","A")),
+         Loc_bin = case_when(Loc_mode_Binary == "Ground" ~ 0,
+                             Loc_mode_Binary == "Tree" ~ 1,
+                             TRUE ~ NA
+                             ),
+        # Loc_bin = as.factor(Loc_bin),
+         Loc_mode_Categorical = as.factor(Loc_mode_Categorical)) |> 
+#################
+#Calculate Indices!
+#################
+# takes the measurements, and turns them into indices. See preprint for more info.
+   mutate(
+    MANUS = Ppl/Mcl,      #MANUS Index
+    HRI = Hsw/Hl,         #Humeral Robustness Index
+    HPI = Hpw/Hl,         #Humeral Proximal Index
+    HEB = Hdw/Hl,         #Humeral Epicondyle Breadth
+    OLI = Uol/Ul,         #Olecranon Process Length Index
+    BI = Rl/Hl,            #Brachial Index
+    IM = (Hl+Ul)/(Fl+Tl), #Intermembral Index
+    PRTI = Mcl/(Hl+Rl),   #Palm Robustness Index
+    FRI = Fsw/Fl,         #Femoral Robustness
+    FEB = Fdw/Fl,         #Femoral Epicondyle Breadth
+    CI = Tl/Fl,           #Crural Index
+    TRI = Tmw/Tl,         #Tibial Robustness Index
+    PES = Pppl/Mtl,       #PES Index
+    #log mass
+    log_Mass = log(Mass_grams)
+        ) |> 
+  #log transforms all linear variables
+  mutate_at(vars(Skl:Pdpw), log) |> 
+  relocate(Loc_bin, .after = Loc_mode_Binary) |> 
+  relocate(Loc_Ord, .after = Loc_mode_Ordinal) |> 
+  relocate(Loc_Ord2, .after = Loc_Ord) |>
+  relocate(log_Mass, .before = Skl) |> 
+  rename(catalog = Specimen_Num) |> 
+  mutate(catalog = str_remove_all(catalog, " ")) |> 
+  mutate(pred_data = "F") |> 
+  select(Genus_species:log_Mass, Hl:Pdpw, MANUS:pred_data)
+```
+
+
+```{r}
+setdiff(names(dat), names(tdat))
+setdiff(names(tdat), names(dat))
+```
+## Combine Datasets
+
+Scale them to a mean of 0 and a standard deviation of 1. 
+Then save it. This will be the main dataset!
+
+
+```{r}
+dat2 <- bind_rows(dat, tdat) |> 
+  #Removing all the measurements in the big dataset that don't matter here
+  select(!c("Hhw", "Hdcw", "Hhl", "Pel", "Il", "Isl", "Fhd", "Fgh", "Tdw", "Fbl", "Fbmw", "Fbpw", "Fbdw", "Csw", "Ccw", "Cl", "Ctl", "Ctw", "Cal", "Anl", "Al", "Atw", "Mcw", "Ppw", "Ipl", "Ipw", "Dpl", "Dpw", "Mtw", "Pppw", "Pipl", "Pipw", "Pdpl", "Pdpw")) |>
+   mutate_at(vars(Fl:log_Mass), scale2)
+```
+
+
+
+## Preliminary Plots
+Using the data to make some prelim plots
+Adding the mean of each species to the plots
+
+MANUS
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_MANUS = mean(MANUS, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = MANUS, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_MANUS), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "MANUS") +
+  theme_bw()
+```
+HPI
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_HPI = mean(HPI, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = HPI, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_HPI), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "HPI") +
+  theme_bw()
+```
+
+OLI
+
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_OLI = mean(OLI, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = OLI, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_OLI), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "OLI") +
+  theme_bw()
+```
+
+PES
+```{r}
+dat |> 
+  #lets visualize the means of each species
+  group_by(genus_species) |> 
+  mutate(mean_PES = mean(PES, na.rm = TRUE)) |> 
+  #now begin plotting
+  ggplot(aes(x = PES, y = genus_species)) + 
+  geom_point() +
+  geom_point(aes(x = mean_PES), 
+             color = "red", 
+             size = 5, 
+             #transparency
+             alpha = 0.1) +
+  labs(title = "PES") +
+  theme_bw()
+```
+
