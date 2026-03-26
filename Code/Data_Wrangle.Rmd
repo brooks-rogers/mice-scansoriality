@@ -26,6 +26,7 @@ I'll use your previous code to generate the indices, calculate geometric means, 
 `mutate` creates a new varaible in the dataframe, but leaves the others untouched. 
 ```{r}
 dat <-  read_csv(here("Data", "MouseMeasurements.csv")) |> 
+  mutate(Genus_species = str_remove_all(Genus_species, " ")) |> 
   #this selects all columns from `catalog` to `Date`, removing the last ones
   select(catalog:Pppl) |> 
   # Make indices
@@ -136,9 +137,52 @@ Then save it. This will be the main dataset!
 dat2 <- bind_rows(dat, tdat) |> 
   #Removing all the measurements in the big dataset that don't matter here
   select(!c("Hhw", "Hdcw", "Hhl", "Pel", "Il", "Isl", "Fhd", "Fgh", "Tdw", "Fbl", "Fbmw", "Fbpw", "Fbdw", "Csw", "Ccw", "Cl", "Ctl", "Ctw", "Cal", "Anl", "Al", "Atw", "Mcw", "Ppw", "Ipl", "Ipw", "Dpl", "Dpw", "Mtw", "Pppw", "Pipl", "Pipw", "Pdpl", "Pdpw")) |>
-   mutate_at(vars(Fl:log_Mass), scale2)
+   mutate_at(vars(Fl:log_Mass), scale2) |> 
+  write_csv(here("Data", "Clean_Data.csv"))
 ```
 
+## Other Pieces of the Puzzle
+
+What data are missing?
+
+```{r}
+dat2 %>% summarise(across(Fl:log_Mass, ~sum(is.na(.x)))) %>% 
+  pivot_longer(everything(), names_to = "column", values_to = "n_NA") %>% 
+  arrange(n_NA) |> print()
+
+# what from the FL dataset is missing?
+
+dat2 %>% filter(pred_data == "T") |> 
+  summarise(across(Fl:log_Mass, ~sum(is.na(.x)))) %>% 
+  pivot_longer(everything(), names_to = "column", values_to = "n_NA") %>% 
+  arrange(n_NA) |> 
+  filter(n_NA == 1) |> print()
+```
+
+The complete data are only missing 1 specimen from the new set. 
+The var_missing are missing a few, and need to be estimated
+Problem is that we are missing mass from quite a few, so we need to estimate. All models will be missing data models, except "HRI", "HPI", "HEB", "FRI", and "FEB"
+```{r}
+var_complete <- c("Fl", "Fdw", "Fsw", "Tpw", "Hl", "Hdw", "Hpw", "Hsw", "HRI", "HPI", "HEB", "FRI", "FEB", "Uol", "Mtl")|> write_rds(here("Data", "var_complete.Rds"))
+
+var_missing <- c("Tmw", "Mcl", "Rl", "OLI", "BI", "Ppl", "Pppl",  "Ul", "PES", "MANUS", "PRTI", "log_Mass", "Tl", "CI", "TRI", "IM") |> write_rds(here("Data", "var_missing.Rds"))
+
+var_complete_linear <- c("Fl", "Fdw", "Fsw", "Tpw", "Hl", "Hdw", "Hpw", "Hsw", "Uol", "Mtl")|> 
+  write_rds(here("Data", "var_complete_linear.Rds"))
+
+# Removing log_mass here beacuse we will have to estimate it always
+var_missing_linear <- c("Tmw", "Mcl", "Ul", "Rl",  "Ppl", "Pppl",  "Tl") |>
+  write_rds(here("Data", "var_missing_linear.Rds"))
+
+var_complete_ratio <- c("HRI", "HPI", "HEB", "FRI", "FEB") |> 
+   write_rds(here("Data", "var_complete_ratio.Rds"))
+
+var_missing_ratio <- c( "OLI", "BI", "PES", "MANUS", "PRTI", "CI", "TRI", "IM") |> 
+  write_rds(here("Data", "var_missing_ratio.Rds"))
+
+var_accurate <- c('HPI', 'PES', 'MANUS', 'Ppl', 'Hl', 'OLI', 'Rl', 'Uol', 'Fl', 'Ul') |> 
+  write_rds(here("Data", "var_accurate.Rds"))
+```
 
 
 ## Preliminary Plots
@@ -149,10 +193,10 @@ MANUS
 ```{r}
 dat |> 
   #lets visualize the means of each species
-  group_by(genus_species) |> 
+  group_by(Genus_species) |> 
   mutate(mean_MANUS = mean(MANUS, na.rm = TRUE)) |> 
   #now begin plotting
-  ggplot(aes(x = MANUS, y = genus_species)) + 
+  ggplot(aes(x = MANUS, y = Genus_species)) + 
   geom_point() +
   geom_point(aes(x = mean_MANUS), 
              color = "red", 
@@ -166,10 +210,10 @@ HPI
 ```{r}
 dat |> 
   #lets visualize the means of each species
-  group_by(genus_species) |> 
+  group_by(Genus_species) |> 
   mutate(mean_HPI = mean(HPI, na.rm = TRUE)) |> 
   #now begin plotting
-  ggplot(aes(x = HPI, y = genus_species)) + 
+  ggplot(aes(x = HPI, y = Genus_species)) + 
   geom_point() +
   geom_point(aes(x = mean_HPI), 
              color = "red", 
@@ -185,10 +229,10 @@ OLI
 ```{r}
 dat |> 
   #lets visualize the means of each species
-  group_by(genus_species) |> 
+  group_by(Genus_species) |> 
   mutate(mean_OLI = mean(OLI, na.rm = TRUE)) |> 
   #now begin plotting
-  ggplot(aes(x = OLI, y = genus_species)) + 
+  ggplot(aes(x = OLI, y = Genus_species)) + 
   geom_point() +
   geom_point(aes(x = mean_OLI), 
              color = "red", 
@@ -203,10 +247,10 @@ PES
 ```{r}
 dat |> 
   #lets visualize the means of each species
-  group_by(genus_species) |> 
+  group_by(Genus_species) |> 
   mutate(mean_PES = mean(PES, na.rm = TRUE)) |> 
   #now begin plotting
-  ggplot(aes(x = PES, y = genus_species)) + 
+  ggplot(aes(x = PES, y = Genus_species)) + 
   geom_point() +
   geom_point(aes(x = mean_PES), 
              color = "red", 
