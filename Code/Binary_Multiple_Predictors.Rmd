@@ -1,16 +1,28 @@
 ---
 title: "Binary Multiple Predictors"
-#output: html_notebook
+output: html_notebook
 ---
 
-Running predictions with multiple predictors based on a dag. This means using **ALL** the top 10 predictors in one model, along with size (log_Mass). No Interactions. 
+# Overview
 
-# Preparation  
+This script fits a Bayesian multivariate model to predict probability of climbing
+behavior from skeletal morphology in rodents. The model uses a custom Bernoulli 
+family to handle species with unknown locomotion (i.e., fossils or species of 
+interest), and a joint imputation model to handle missing skeletal measurements.
 
-### Load packages and functions  
+Predictions are made for four focal Florida rodent species:
+- Ochrotomys nuttalli (golden mouse — expected to be more arboreal)
+- Peromyscus gossypinus (cotton mouse)
+- Peromyscus polionotus (oldfield mouse)
+- Podomys floridanus (Florida mouse)
+
+---
+
+# 1. Setup
+
 ```{r message = FALSE, warning=FALSE, include = FALSE}
-
-pacman::p_load(tidyverse,  brms, cmdstanr, kableExtra, here, ape, tidybayes, patchwork, glue, ggthemes)
+pacman::p_load(tidyverse, brms, cmdstanr, kableExtra, here, ape, 
+               tidybayes, patchwork, glue, ggthemes, furrr, tictoc)
 
 options(brms.backend = "cmdstanr")
 
@@ -18,510 +30,203 @@ here::i_am("README.md")
 here()
 ```
 
-
-
-### Load data  
-
-All data loading and wrangling in `Code/Data_Wrangle.Rmd`
 ```{r}
+# Load cleaned data (wrangling done in Code/Data_Wrangle.Rmd)
 dat <- read_csv(here("Data", "Clean_Data.csv"))
 
-#species in dataset
+# Species present in dataset (needed to prune the phylogeny)
 spp_obs <- dat$Taxon_Upham_style %>% unique()
 
-# Organizing complete measurements and those with missing values.
-# they require different models
-var_complete <-  read_rds(here("Data", "var_complete.Rds"))
-var_missing <-  read_rds(here("Data", "var_missing.Rds"))
-var_complete_linear <-  read_rds(here("Data", "var_complete_linear.Rds"))
-var_missing_linear <-  read_rds(here("Data", "var_missing_linear.Rds"))
-var_complete_ratio <-  read_rds(here("Data", "var_complete_ratio.Rds"))
-var_missing_ratio <-  read_rds(here("Data", "var_missing_ratio.Rds"))
-var_accurate <- read_rds(here("Data", "var_accurate.Rds"))
+# Color palette (one color per species, used throughout)
+pal <- c('#62361B', '#f48a1a', '#e6ab02', '#66a61e', '#31c1bb', 
+         '#0d57ff', '#5e1ea6', '#f9581c', '#f384f8')
 
-#Color palette
-pal = c('#62361B', '#f48a1a', '#e6ab02', '#66a61e', '#31c1bb', '#0d57ff', '#5e1ea6', '#f9581c' , '#f384f8')
-
-
-# Load Tree & Get Cor Matrix
-
-tr <- ape::read.nexus(
-  here("Data","MCC_Upham_all_mammals.nex"))
+# Load phylogenetic tree and compute correlation matrix
+# vcv.phylo() returns a variance-covariance matrix used as a prior 
+# for the phylogenetic random effect in brms
+tr <- ape::read.nexus(here("Data", "MCC_Upham_all_mammals.nex"))
 tr <- ape::keep.tip(tr, spp_obs)
-A <- ape::vcv.phylo(tr, corr = TRUE)
+A  <- ape::vcv.phylo(tr, corr = TRUE)
 ```
 
-## Multiple Regression Model
+---
 
+# 2. Custom Bernoulli Family for Missing Locomotion Data
 
-Phylo Trick:
+The key challenge: many species in the dataset have no known locomotion category
+(Loc_bin = NA). We want to fit the model using species with known locomotion,
+but generate predictions for species without it.
+
+The standard approach would be to drop NAs, but we also want those species'
+morphology to inform the imputation submodels. The solution is a custom Stan
+likelihood function that contributes zero to the log-likelihood when locomotion 
+is unknown — effectively marginalizing those observations out.
+
+Mathematically: P(data | Loc_bin unknown) = p + (1-p) = 1, so log P = 0.
+
 ```{r}
-# 1. Create indicator
+# Create a placeholder response and an observation indicator:
+# Loc_bin_obs = -1  means locomotion is unknown (excluded from likelihood)
+# Loc_bin_obs >= 0  means locomotion is known (standard Bernoulli likelihood)
 dat <- dat %>%
   mutate(
     Loc_bin_obs = ifelse(is.na(Loc_bin), -1L, as.integer(Loc_bin)),
-    y_for_brms = ifelse(is.na(Loc_bin), 0L, as.integer(Loc_bin))
+    y_for_brms  = ifelse(is.na(Loc_bin),  0L, as.integer(Loc_bin))
   )
 
-# 2. Define custom family
+# Define the custom brms family
 bernoulli_missing <- custom_family(
-  name = "bernoulli_missing",
+  name  = "bernoulli_missing",
   dpars = "mu",
   links = "logit",
   lb = 0, ub = 1,
   type = "int",
-  vars = "vint1[n]"
+  vars = "vint1[n]"   # vint1 carries Loc_bin_obs into Stan
 )
 
+# Stan function: if obs is known, use standard Bernoulli; if unknown, return 0
 stan_funs <- "
   real bernoulli_missing_lpmf(int y_placeholder, real mu, int y_obs) {
     if (y_obs >= 0) {
-      return bernoulli_lpmf(y_obs | mu);
+      return bernoulli_lpmf(y_obs | mu);  // known: standard likelihood
     } else {
-      return 0;
+      return 0;                            // unknown: excluded from likelihood
     }
   }
 "
 stanvars <- stanvar(scode = stan_funs, block = "functions")
+
+# Required for add_epred_draws() to know how to compute expected values
+# for this custom family (brms can't infer this automatically)
+posterior_epred_bernoulli_missing <- function(prep) {
+  mu <- brms::get_dpar(prep, "mu")
+  mu
+}
 ```
 
-Here are the accurate measurements:
-"HPI"   "PES"   "MANUS" "Ppl"   "Hl"    "OLI"   "Rl"    "Uol"   "Fl"    "Ul"   
-With complete data are:
-Fl, Hl, HPI, Uol
-With missing data are:
-PES, MANUS, Ppl, Ul, OLI, Rl
+---
 
-#### Model Objects
+# 3. Model Specification
+
+Predictors come from variable selection that used predictive accuracy. The top 10 accurate
+skeletal predictors are used, plus log body mass.
+
+Complete measurements (no missing data): Fl, Hl, HPI, Uol
+Measurements with some missing data: PES, MANUS, Ppl, Ul, OLI, Rl, log_Mass
+
+Missing measurements are handled by joint imputation submodels: each missing
+variable is modeled as a function of the complete skeletal measurements, with
+its own phylogenetic random effect. The imputed values are integrated into the
+main model, propagating imputation uncertainty into climbing predictions.
+
 ```{r}
-bin_mod <-  bf(y_for_brms | vint(Loc_bin_obs) ~ Fl + Hl + HPI + Uol + mi(PES) + mi(MANUS) + mi(Ppl) + mi(Ul)
-               + mi(OLI) + mi(Rl) + mi(log_Mass) + (1|Genus_species) 
-               + (1|gr(Taxon_Upham_style,cov = A))) + bernoulli_missing
-  
-PES_mod <- bf(PES| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+# Main binary outcome model
+bin_mod <- bf(
+  y_for_brms | vint(Loc_bin_obs) ~ 
+    Fl + Hl + HPI + Uol +                            # complete predictors
+    mi(PES) + mi(MANUS) + mi(Ppl) + mi(Ul) +         # imputed predictors
+    mi(OLI) + mi(Rl) + mi(log_Mass) +
+    (1 | Genus_species) +                             # species random effect
+    (1 | gr(Taxon_Upham_style, cov = A))              # phylogenetic random effect
+) + bernoulli_missing
 
-MANUS_mod <- bf(MANUS| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+# Imputation submodels — one per missing variable
+# Each predicts the missing measurement from the complete skeletal measurements
+PES_mod   <- bf(PES   | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+MANUS_mod <- bf(MANUS | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+Ppl_mod   <- bf(Ppl   | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+Ul_mod    <- bf(Ul    | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+OLI_mod   <- bf(OLI   | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+Rl_mod    <- bf(Rl    | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+mass_mod  <- bf(log_Mass | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
 
-Ppl_mod <- bf(Ppl| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+# Combine all submodels; set_rescor(FALSE) because residual correlations 
+# between responses are not meaningful here
+m_form <- bin_mod + PES_mod + MANUS_mod + Ppl_mod + Ul_mod + 
+          OLI_mod + Rl_mod + mass_mod + set_rescor(FALSE)
 
-Ul_mod <- bf(Ul| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl  + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+# Priors — weakly informative
+# coef == "" targets class-level priors only (not individual coefficients)
+pri <- get_prior(m_form, data = dat, data2 = list(A = A)) %>%
+  mutate(prior = case_when(
+    class == "b" & coef == ""                          ~ "normal(0, 2)",
+    class == "sd" & coef == "" & resp == "yforbrms"    ~ "normal(0, 0.3)",
+    class == "sd" & coef == "" & resp != "yforbrms"    ~ "normal(0, 1)",
+    class == "Intercept"                               ~ "normal(0, 2)",
+    class == "sigma"                                   ~ "normal(0, 0.5)",
+    TRUE ~ prior
+  ))
+```
 
-OLI_mod <- bf(OLI| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl  + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+---
 
-Rl_mod <- bf(Rl| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl  + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+# 4. Fit and Save Model
 
-mass_mod <- bf(log_Mass| mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl + (1|Genus_species) + 
-                (1|gr(Taxon_Upham_style, cov = A))) + gaussian()
+```{r}
+multmod <- brm(
+  m_form,
+  data     = dat,
+  data2    = list(A = A),
+  prior    = pri,
+  cores    = 4,
+  seed     = 145,
+  refresh  = 0,
+  silent   = 2,
+  control  = list(max_treedepth = 15),
+  stanvars = stanvars
+)
 
-m_form <- bin_mod + PES_mod + MANUS_mod + Ppl_mod + Ul_mod + OLI_mod + Rl_mod + mass_mod + set_rescor(FALSE)
-  
-pri <- get_prior(m_form,
-  data2 = list(A = A),
-           data = dat) %>% 
+multmod %>% write_rds(here("Data", "B_mod_multi.Rds"))
+```
+
+---
+
+# 5. Prepare Prediction Data
+
+```{r}
+# Focal species for prediction
+mice <- c("Podomys_floridanus", "Ochrotomys_nuttalli", 
+          "Peromyscus_gossypinus", "Peromyscus_polionotus")
+
+# Filter to focal species and set locomotion as unknown for all specimens
+# (y_for_brms = 0 and Loc_bin_obs = -1 tells the model to exclude these
+# from the likelihood and generate predictions only)
+model_dat <- dat %>% 
+  filter(Genus_species %in% mice) %>%
   mutate(
-    prior = case_when(
-      class == "b" & coef == ""  ~ "normal(0, 2)",
-      class == "sd" & coef == ""  ~ "normal(0, 0.3)",
-      class == "Intercept" ~ "normal(0, 2)",
-      class == "sigma" ~ "normal(0, 0.5)",
-      TRUE ~ prior
-      ))
-
-
-multmod <- brm(m_form,
-                    data=dat,
-                    refresh = 0,
-                    cores = 4,
-                    data2 = list(A = A),
-                    prior = pri,
-                    seed = 145,
-                    control=list(max_treedepth=15),
-                    silent = 2,
-                    stanvars = stanvars
-               )
-```
-
-## Save Models
-```{r}
-multmod %>% write_rds(here("Data","B_mod_multi.Rds"))
-```
-
-# Predictions  
-
-```{r}
-mice <- c("Podomys_floridanus", "Ochrotomys_nuttalli","Peromyscus_gossypinus", "Peromyscus_polionotus")
-
-model_dat <- dat %>% filter(Genus_species %in% c(mice)) |>
-  mutate(
-    y_for_brms = 0L,
+    y_for_brms  = 0L,
     Loc_bin_obs = -1L
   )
 ```
 
+---
+
+# 6. Full Predictions (individual specimens)
 
 ```{r}
-posterior_epred_bernoulli_missing <- function(prep) {
-  mu <- brms::get_dpar(prep, "mu")
-  mu
-}
-
+# Predictions for each individual specimen using the full model
+# (both species and phylogenetic random effects included)
 pred_df_ext_full <- multmod %>% 
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE, 
-                    re_formula = NULL) %>% 
-    as.data.frame() %>% 
-    select(Genus_species, Prob_of_Climbing, catalog) %>% 
-  mutate(method = "Full")
-    
+  add_epred_draws(
+    newdata          = model_dat, 
+    resp             = "yforbrms",       # response name (brms strips underscores)
+    value            = "Prob_of_Climbing",
+    allow_new_levels = TRUE, 
+    re_formula       = NULL              # include all random effects
+  ) %>% 
+  as.data.frame() %>% 
+  select(Genus_species, Prob_of_Climbing, catalog)
 
-pred_df_ext_fos <- multmod %>% 
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    #allow_new_levels = TRUE, 
-                    re_formula = NA) %>% 
-    as.data.frame() %>% 
-    select(Genus_species, Prob_of_Climbing, catalog) %>% 
-  mutate(method = "NoPhylo")
-```
-
-# Average Over Individuals
-```{r}
-pred_species <-multmod %>%
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    #allow_new_levels = TRUE, 
-                    re_formula = NULL) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
-```
-
-# Plot
-
-```{r}
+# Plot individual specimens sorted by species and mean prediction
 pred_df_ext_full %>%
   group_by(catalog, Genus_species) %>%
   mutate(mean_prob = mean(Prob_of_Climbing, na.rm = TRUE)) %>%
   ungroup() %>%
-  mutate(catalog = reorder(catalog, mean_prob),
-         catalog = reorder(catalog, as.numeric(factor(Genus_species)))) %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = catalog,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-# Average Over Individuals
-```{r}
-pred_species <-multmod %>%
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE, 
-                    re_formula = NULL) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
-
-p1 <- pred_species %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = Genus_species,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-pred_species <-multmod %>%
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE, 
-                    re_formula = NA) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
-
-p2 <- pred_species %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = Genus_species,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-pred_species <-multmod %>%
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    #allow_new_levels = TRUE, 
-                    re_formula = NULL) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
-
-p3 <- pred_species %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = Genus_species,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-pred_species <-multmod %>%
-    add_epred_draws(newdata = model_dat, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    #allow_new_levels = TRUE, 
-                    re_formula = NA) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
-
-p4 <- pred_species %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = Genus_species,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-(p1 + p2) / (p3 + p4) + plot_layout(guides = "collect")
-```
-
-```{r}
-hplot <- function(groups, method_choice){
-  pred_all %>% 
-    filter(Genus_species %in% {{groups}},
-           method == {{method_choice}}) %>% 
-    ggplot(aes(y = Prob_of_Climbing, 
-               x = catalog, 
-               color = Genus_species)) +
-    geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-    stat_pointinterval(.width = c(0.5, 0.68268), 
-                       position = position_dodge(width = -.6)) + 
-    ylim(0,1) +
-    labs(x = "", y = "Probability of Climbing") +
-    scale_color_manual(values = pal) + 
-    facet_wrap(~Genus_species, scales = "free_x") +
-    theme_bw() + 
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-          legend.position = "none")
-}
-```
-
-
-
-```{r}
-
-pred_all <- bind_rows(pred_df_ext_full, pred_df_ext_fos, pred_df) %>% #filter(var %in% var_acc) %>% 
-  mutate(draw = rep(1:4000, times = nrow(.)/4000)) %>% 
-  #THIS IS AVERAGING PER SPECIES
-  group_by(substrate, method, Genus_species, draw) %>% 
-  summarize(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE)) %>% ungroup() %>% mutate(var = "combined") %>% 
-  write_csv(here("Data", "Binary_Mult_Preds.csv"))
-
-```
-
-
-# Predictions 2
-
-```{r}
-
-mice <- c("Podomys_floridanus", "Ochrotomys_nuttalli","Peromyscus_gossypinus", "Peromyscus_polionotus", "Cynocephalus_volans")
-
-posterior_epred_bernoulli_missing <- function(prep) {
-  mu <- brms::get_dpar(prep, "mu")
-  mu
-}
-
-model_dat <- dat %>% filter(Genus_species %in% c(mice)) |>
   mutate(
-    y_for_brms = 0L,
-    Loc_bin_obs = -1L
-  )
-
-# Full model (both REs)
-pred_full <- multmod %>% 
-    add_epred_draws(newdata = model_dat,
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE,
-                    re_formula = NULL) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop") %>%
-  mutate(method = "Full")
-
-# Species RE only (no phylo)
-pred_species_only <- multmod %>% 
-    add_epred_draws(newdata = model_dat,
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE,
-                    re_formula = ~(1|Genus_species)) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop") %>%
-  mutate(method = "Species_RE")
-
-# Phylo only (no species RE)
-pred_phylo_only <- multmod %>% 
-    add_epred_draws(newdata = model_dat,
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE,
-                    re_formula = ~(1|gr(Taxon_Upham_style, cov = A))) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop") %>%
-  mutate(method = "Phylo_only")
-
-# Fixed effects only
-pred_fixef <- multmod %>% 
-    add_epred_draws(newdata = model_dat,
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE,
-                    re_formula = NA) %>%
-  group_by(Genus_species, .draw) %>%
-  summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop") %>%
-  mutate(method = "Fixed_only")
-
-# Combine
-pred_all <- bind_rows(pred_full, pred_species_only, pred_phylo_only, pred_fixef) %>%
-  mutate(method = factor(method, levels = c("Full", "Species_RE", "Phylo_only", "Fixed_only")))
-
-# Plot
-pred_all %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = method,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89),
-                     position = position_dodge(width = 0.4)) +
-  ylim(0, 1) +
-  facet_wrap(~Genus_species) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "none")
-```
-
-
-```{r}
-posterior_epred_bernoulli_missing <- function(prep) {
-  mu <- brms::get_dpar(prep, "mu")
-  mu
-}
-```
-
-
-
-# PRediction 3 Imputation
-```{r}
-model_dat_imp <- model_dat %>%
-  group_by(Genus_species) %>%
-  mutate(across(c(PES, MANUS, Ppl, Ul, OLI, Rl, log_Mass),
-                ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
-  ungroup()
-
-
-posterior_epred_bernoulli_missing <- function(prep) {
-  mu <- brms::get_dpar(prep, "mu")
-  mu
-}
-
-pred_df_ext_full <- multmod %>% 
-    add_epred_draws(newdata = model_dat_imp, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE, 
-                    re_formula = NULL) %>% 
-    as.data.frame() %>% 
-    select(Genus_species, Prob_of_Climbing, catalog) %>% 
-  mutate(method = "Full")
-
-pred_df_ext_full %>%
-  group_by(catalog, Genus_species) %>%
-  mutate(mean_prob = mean(Prob_of_Climbing, na.rm = TRUE)) %>%
-  ungroup() %>%
-  mutate(catalog = reorder(catalog, mean_prob),
-         catalog = reorder(catalog, as.numeric(factor(Genus_species)))) %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = catalog,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-```
-Prediction 4 - complete
-```{r}
-model_dat_complete <- model_dat %>%
-  filter(!is.na(PES) | TRUE) %>%  # mi() variables are fine
-  # actually drop specimens missing complete-data predictors
-  # plus any with NA in mi() variables that weren't in training data
-  anti_join(
-    pred_df_ext_full %>%
-      group_by(catalog) %>%
-      summarise(prop_na = mean(is.na(Prob_of_Climbing))) %>%
-      filter(prop_na > 0),
-    by = "catalog"
-  )
-
-
-posterior_epred_bernoulli_missing <- function(prep) {
-  mu <- brms::get_dpar(prep, "mu")
-  mu
-}
-
-pred_df_ext_full <- multmod %>% 
-    add_epred_draws(newdata = model_dat_complete, 
-                    resp = "yforbrms",
-                    value = "Prob_of_Climbing",
-                    allow_new_levels = TRUE, 
-                    re_formula = NULL) %>% 
-    as.data.frame() %>% 
-    select(Genus_species, Prob_of_Climbing, catalog) %>% 
-  mutate(method = "Full")
-
-pred_df_ext_full %>%
-  group_by(catalog, Genus_species) %>%
-  mutate(mean_prob = mean(Prob_of_Climbing, na.rm = TRUE)) %>%
-  ungroup() %>%
-  mutate(catalog = reorder(catalog, mean_prob),
-         catalog = reorder(catalog, as.numeric(factor(Genus_species)))) %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = catalog,
-             color = Genus_species)) +
+    catalog = reorder(catalog, mean_prob),
+    catalog = reorder(catalog, as.numeric(factor(Genus_species)))
+  ) %>%
+  ggplot(aes(y = Prob_of_Climbing, x = catalog, color = Genus_species)) +
   geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
   stat_pointinterval(.width = c(0.5, 0.89)) +
   ylim(0, 1) +
@@ -531,17 +236,81 @@ pred_df_ext_full %>%
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-# Predicting missing values per measurement per species
+---
 
+# 7. Proper Imputation-Aware Predictions
+
+## Why this is needed
+
+brms's mi() imputation works by estimating posterior distributions for missing
+values during model fitting (stored as Ymi_ parameters in the Stan output).
+However, when predicting for new data, brms cannot impute new missing values —
+it only imputed the specific NA slots it saw during training.
+
+The solution: extract the posterior imputed values (Ymi_) from the fitted model
+and inject them draw-by-draw into the prediction newdata. This properly propagates
+imputation uncertainty into the climbing predictions rather than collapsing
+missing values to a point estimate (e.g., species median).
+
+This matters especially for PES, which has a large coefficient (~1.56 on the
+logit scale) and imputation intervals up to 2.5 z-score units wide.
 
 ```{r}
+# Identify which rows in dat correspond to focal species
+focal_rows <- which(dat$Genus_species %in% mice)
+
+# Extract posterior imputed values for all mi() variables
+ymi_draws <- as_draws_df(multmod) %>%
+  select(.draw, starts_with("Ymi_"))
+
+# Parse the Ymi_ column names to get variable name and original row index
+# The index in e.g. Ymi_PES[62] refers to row 62 of dat
+ymi_index_df <- tibble(col = names(ymi_draws)[-1]) %>%
+  mutate(
+    variable = str_extract(col, "(?<=Ymi_)[A-Za-z]+"),
+    row_idx  = as.integer(str_extract(col, "(?<=\\[)\\d+(?=\\])"))
+  ) %>%
+  filter(row_idx %in% focal_rows) %>%
+  left_join(
+    dat %>% mutate(row_idx = row_number()) %>% select(row_idx, catalog, Genus_species),
+    by = "row_idx"
+  )
+
+# Pivot to long format for easy per-draw filtering
+ymi_long <- ymi_draws %>%
+  pivot_longer(-.draw, names_to = "col", values_to = "imputed") %>%
+  inner_join(ymi_index_df %>% select(col, variable, row_idx, catalog), by = "col") %>%
+  select(.draw, variable, row_idx, catalog, imputed)
+
+# mi() variables that need draw-by-draw imputation
+mi_vars <- c("PES", "MANUS", "Ppl", "Ul", "OLI", "Rl", "log_Mass")
+
+# Add row indices to model_dat for joining with Ymi_ draws
+model_dat_indexed <- model_dat %>%
+  mutate(row_idx = which(dat$Genus_species %in% mice))
+
+# Empty tibble to ensure all _imp columns always exist after pivot_wider
+# (avoids errors when a variable has no missing values for a given draw)
+empty_imp <- tibble(
+  row_idx      = integer(),
+  PES_imp      = double(), MANUS_imp    = double(), Ppl_imp      = double(),
+  Ul_imp       = double(), OLI_imp      = double(), Rl_imp       = double(),
+  log_Mass_imp = double()
+)
+```
+
+warning, this takes a long time, maybe don't try it on your computer.
+```{r}
+# Run predictions draw-by-draw, filling in imputed values for each draw
+# Uses parallel processing (furrr) for speed and chunked saving for safety
+# ~5 minutes with 8 workers and 1000 thinned draws
+
 tictoc::tic()
 plan(multisession, workers = 8)
 
+thin_draws <- seq(1, 4000, by = 4)  # thin to 1000 draws (every 4th)
 chunk_size <- 250
-
-thin_draws <- seq(1, 4000, by = 4)  # every 4th draw = 1000 total
-chunks <- split(thin_draws, ceiling(seq_along(thin_draws) / chunk_size))
+chunks     <- split(thin_draws, ceiling(seq_along(thin_draws) / chunk_size))
 
 for (chunk_i in seq_along(chunks)) {
   chunk_draws <- chunks[[chunk_i]]
@@ -550,38 +319,45 @@ for (chunk_i in seq_along(chunks)) {
   chunk_results <- future_map(chunk_draws, ~{
     d <- .x
     
+    # Get imputed values for this draw, ensuring all _imp columns exist
     imputed_d <- ymi_long %>%
       filter(.draw == d) %>%
       select(row_idx, variable, imputed) %>%
       pivot_wider(names_from = variable, values_from = imputed) %>%
       bind_rows(empty_imp)
     
+    # Fill in missing mi() variables with this draw's imputed values
+    # coalesce() keeps observed values and fills NAs with imputed values
     newdata_d <- model_dat_indexed %>%
       left_join(imputed_d, by = "row_idx", suffix = c("", "_imp")) %>%
       mutate(
-        PES      = coalesce(PES, PES_imp),
-        MANUS    = coalesce(MANUS, MANUS_imp),
-        Ppl      = coalesce(Ppl, Ppl_imp),
-        Ul       = coalesce(Ul, Ul_imp),
-        OLI      = coalesce(OLI, OLI_imp),
-        Rl       = coalesce(Rl, Rl_imp),
+        PES      = coalesce(PES,      PES_imp),
+        MANUS    = coalesce(MANUS,    MANUS_imp),
+        Ppl      = coalesce(Ppl,      Ppl_imp),
+        Ul       = coalesce(Ul,       Ul_imp),
+        OLI      = coalesce(OLI,      OLI_imp),
+        Rl       = coalesce(Rl,       Rl_imp),
         log_Mass = coalesce(log_Mass, log_Mass_imp)
       ) %>%
       select(-ends_with("_imp"), -row_idx)
     
+    # Generate prediction for this single draw, then tag with draw number
+    # (draw_ids reindexes internally so we tag manually with mutate)
     multmod %>%
-  add_epred_draws(newdata = newdata_d,
-                  resp = "yforbrms",
-                  value = "Prob_of_Climbing",
-                  allow_new_levels = TRUE,
-                  re_formula = NULL,
-                  draw_ids = d) %>%
-  as.data.frame() %>%
-  select(Genus_species, catalog, Prob_of_Climbing) %>%
-  mutate(.draw = d)  # tag with the actual draw number
-  },
-  .options = furrr_options(
-    seed = TRUE,
+      add_epred_draws(
+        newdata          = newdata_d,
+        resp             = "yforbrms",
+        value            = "Prob_of_Climbing",
+        allow_new_levels = TRUE,
+        re_formula       = NULL,
+        draw_ids         = d
+      ) %>%
+      as.data.frame() %>%
+      select(Genus_species, catalog, Prob_of_Climbing) %>%
+      mutate(.draw = d)
+    
+  }, .options = furrr_options(
+    seed    = TRUE,
     globals = c("ymi_long", "model_dat_indexed", "empty_imp", "multmod",
                 "posterior_epred_bernoulli_missing"),
     packages = c("dplyr", "tidyr", "brms", "tidybayes")
@@ -592,16 +368,45 @@ for (chunk_i in seq_along(chunks)) {
 }
 
 plan(sequential)
-
 tictoc::toc()
-# After all chunks done, reassemble
+
+# Reassemble all chunks into a single dataframe
 pred_proper <- map(seq_along(chunks), ~{
   readRDS(here("Data", glue("pred_chunk_{.x}.rds")))
 }) %>%
   flatten() %>%
   bind_rows()
 ```
-Now average and plotting the proper predictions
+
+---
+
+# 8. Plots
+
+## Individual specimen predictions
+
+```{r}
+pred_proper %>%
+  group_by(catalog, Genus_species) %>%
+  mutate(mean_prob = mean(Prob_of_Climbing, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    catalog = reorder(catalog, mean_prob),
+    catalog = reorder(catalog, as.numeric(factor(Genus_species)))
+  ) %>%
+  ggplot(aes(y = Prob_of_Climbing, x = catalog, color = Genus_species)) +
+  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
+  stat_pointinterval(.width = c(0.5, 0.89)) +
+  ylim(0, 1) +
+  labs(x = "", y = "Probability of Climbing") +
+  scale_color_manual(values = pal) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Species-level predictions (averaged over individuals)
+
+Averaging is done over posterior draws before summarizing, not over summaries.
+This correctly propagates individual-level uncertainty into the species estimate.
 
 ```{r}
 pred_proper_species <- pred_proper %>%
@@ -609,105 +414,44 @@ pred_proper_species <- pred_proper %>%
   summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE), .groups = "drop")
 
 pred_proper_species %>%
-  ggplot(aes(y = Prob_of_Climbing,
-             x = Genus_species,
-             color = Genus_species)) +
+  ggplot(aes(y = Prob_of_Climbing, x = Genus_species, color = Genus_species)) +
   geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
   stat_pointinterval(.width = c(0.5, 0.89)) +
   ylim(0, 1) +
   labs(x = "", y = "Probability of Climbing") +
   scale_color_manual(values = pal) +
   theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "none")
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
 ```
 
+## Pairwise contrasts between species
 
-
-
-# Whole Shebang  
-
-
-### function
-```{r}
-
-hplot <- function(groups, method){
-  pred_all %>% filter(Genus_species %in% {{groups}},
-                         method == {{method}}) %>% 
-  ggplot(aes(y = Prob_of_Climbing, 
-             x = Genus_species, 
-             #y = var,
-             color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.68268), 
-                     #linewidth = c(0.75, 0.5), 
-                     position = position_dodge(width = -.6)) + ylim(0,1) +
-    labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) + theme_bw() + 
-  theme(axis.text.x=element_text(angle=45, hjust=1))
-}
-
-```
-
-###  big df
-
-
-
-### Big Plot
-```{r}
-pl5 <- hplot(old, "Fossil") + 
-  ggtitle("Mesozoic Mammal Predictions") 
-
-pl6 <- hplot(multi, "Fossil") + 
-  ggtitle("Multituberculate Predicitons") 
-
-pl7 <- hplot(primate, "Fossil") + 
-  ggtitle("Primate Predicitons") 
-
-
-t3 <- pl5 / pl6 /pl7
-
-t3
-
-ggsave(here("Plots", "Predict_Bin_Mult_Fossil.pdf"), height = 8, width = 13)
-
-```
-
+Contrasts are computed directly from posterior draws (pivot wide, subtract).
+This gives a proper posterior distribution for the difference, not just a 
+difference of point estimates.
 
 ```{r}
-pl1 <- hplot(extant_climb, "Full") + 
-  ggtitle("Extant Climb Full Predictions") 
+pred_proper_species %>%
+  pivot_wider(names_from = Genus_species, values_from = Prob_of_Climbing) %>%
+  mutate(
+    Ochr_vs_Pgoss  = Ochrotomys_nuttalli - Peromyscus_gossypinus,
+    Ochr_vs_Ppoli  = Ochrotomys_nuttalli - Peromyscus_polionotus,
+    Ochr_vs_Podo   = Ochrotomys_nuttalli - Podomys_floridanus,
+    Pgoss_vs_Ppoli = Peromyscus_gossypinus - Peromyscus_polionotus,
+    Pgoss_vs_Podo  = Peromyscus_gossypinus - Podomys_floridanus,
+    Ppoli_vs_Podo  = Peromyscus_polionotus - Podomys_floridanus
+  ) %>%
+  select(.draw, Ochr_vs_Pgoss:Ppoli_vs_Podo) %>%
+  pivot_longer(-.draw, names_to = "contrast", values_to = "difference") %>%
+  ggplot(aes(y = difference, x = contrast)) +
+  geom_hline(yintercept = 0, linetype = 2, linewidth = 0.5) +
+  stat_pointinterval(.width = c(0.5, 0.89)) +
+  labs(x = "", y = "Difference in P(Climbing)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-pl2 <- hplot(extant_climb, "Fossil") + 
-  ggtitle("Extant Climb Fossil") 
-
-pl3 <- hplot(extant_ground, "Full") + 
-  ggtitle("Extant Ground Full Predictions") 
-
-pl4 <- hplot(extant_ground, "Fossil") + 
-  ggtitle("Extant Ground Fossil") 
-
-
-t1 <- pl1 / pl2 + plot_layout(guides = "collect")
-
-t2 <- pl3 / pl4 + plot_layout(guides = "collect")
-
-wrap_plots(t1, t2, ncol = 1)
-
-ggsave(here("Plots", "Predict_Bin_Mult_Extant.pdf"), height = 10, width = 8)
-
-```
-
-```{r}
-pl2 / pl4 + plot_layout(guides = "collect")
-
-ggsave(here("Plots", "Predict_Bin_Mult_Extant2.pdf"), height = 6, width = 13)
-```
-
-
-
-```{r}
-wrap_plots(t1, t2, t3, ncol = 1, heights = c(2/7, 2/7, 3/7))
-
-ggsave(here("Plots", "Predict_Bin_Mult_All.pdf"), height = 16, width = 13)
+ggsave(here("Plots", "Bin_Multiple_Reg_Plots.pdf"), height = 8, width = 13)
 ```

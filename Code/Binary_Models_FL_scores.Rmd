@@ -1,0 +1,373 @@
+---
+title: "Binary Models — Individual Predictors with FL Rodents — Known Locomotion Scores"
+output: html_notebook
+---
+
+# Overview
+
+This script is a modified version of `Binary_Models.Rmd`. The key difference
+is that this version uses a training dataset that includes known locomotion
+scores (Loc_bin) for the four focal Florida rodent species:
+
+- Ochrotomys nuttalli  → climbing (1)
+- Peromyscus gossypinus → climbing (1)
+- Peromyscus polionotus → no climbing (0)
+- Podomys floridanus   → no climbing (0)
+
+Because locomotion is now known for these species, the custom Bernoulli family
+is not needed — standard bernoulli() is used instead, with Loc_bin as the
+response directly. Everything else (model structure, priors, predictions,
+plots) is identical to Binary_Models.Rmd.
+
+---
+
+# 1. Setup
+
+```{r message = FALSE, warning=FALSE, include = FALSE}
+pacman::p_load(tidyverse, brms, cmdstanr, kableExtra, here, ape, tidybayes, patchwork, glue)
+
+options(brms.backend = "cmdstanr")
+
+here::i_am("README.md")
+here()
+```
+
+```{r}
+# Load dataset with known locomotion scores for the FL species
+dat <- read_csv(here("Data", "Clean_Data_FL_scores.csv"))
+
+# Species in the dataset (needed to prune the phylogeny)
+spp_obs <- dat$Taxon_Upham_style %>% unique()
+
+# Variable lists — organized by measurement type and missingness
+var_complete        <- read_rds(here("Data", "var_complete.Rds"))
+var_missing         <- read_rds(here("Data", "var_missing.Rds"))
+var_complete_linear <- read_rds(here("Data", "var_complete_linear.Rds"))
+var_missing_linear  <- read_rds(here("Data", "var_missing_linear.Rds"))
+var_complete_ratio  <- read_rds(here("Data", "var_complete_ratio.Rds"))
+var_missing_ratio   <- read_rds(here("Data", "var_missing_ratio.Rds"))
+```
+
+```{r}
+# Load phylogenetic tree and compute correlation matrix
+tr <- ape::read.nexus(here("Data", "MCC_Upham_all_mammals.nex"))
+tr <- ape::keep.tip(tr, spp_obs)
+A  <- ape::vcv.phylo(tr, corr = TRUE)
+```
+
+---
+
+# 2. Linear Measurement Models
+
+Linear measurements are fit with log body mass as a covariate. Body mass is
+itself sometimes missing, so it is also imputed via a submodel.
+
+All predictors are z-scored prior to modeling (done in Data_Load.Rmd).
+
+## 2a. Linear measurements with predictor missing
+
+```{r}
+list_b_lm <- vector(mode = "list")
+```
+
+```{r}
+for (i in var_missing_linear) {
+  
+  # Standard bernoulli() — Loc_bin used directly as response
+  bin_mod <- bf(
+    paste0("Loc_bin ~ mi(", i, ") + mi(log_Mass) + 
+            (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))")
+  ) + bernoulli()
+  
+  imp_mod <- bf(
+    paste0(i, " | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl +
+            (1|gr(Taxon_Upham_style, cov = A))")
+  ) + gaussian()
+  
+  mass_mod <- bf(
+    "log_Mass | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl +
+     (1|gr(Taxon_Upham_style, cov = A))"
+  ) + gaussian()
+  
+  m_form <- bin_mod + imp_mod + mass_mod + set_rescor(FALSE)
+  
+  # Priors set per response:
+  # - Tighter SD prior for binary outcome (phylo/species signal is small)
+  # - Wider SD prior for Gaussian imputation submodels
+  pri <- get_prior(m_form, data2 = list(A = A), data = dat) %>%
+    mutate(
+      prior = case_when(
+        class == "b" & coef == ""                      ~ "normal(0, 2)",
+        class == "sd" & coef == "" & resp == "Locbin"  ~ "normal(0, 0.3)",
+        class == "sd" & coef == "" & resp != "Locbin"  ~ "normal(0, 1)",
+        class == "Intercept"                           ~ "normal(0, 2)",
+        class == "sigma"                               ~ "normal(0, 0.5)",
+        TRUE ~ prior
+      )
+    )
+  
+  list_b_lm[[i]] <- brm(
+    m_form,
+    data    = dat,
+    data2   = list(A = A),
+    prior   = pri,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+## 2b. Linear measurements with complete data (only log_Mass missing)
+
+```{r}
+for (i in var_complete_linear) {
+  
+  bin_mod <- bf(
+    paste0("Loc_bin ~ ", i, " + mi(log_Mass) + 
+            (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))")
+  ) + bernoulli()
+  
+  mass_mod <- bf(
+    "log_Mass | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl +
+     (1|gr(Taxon_Upham_style, cov = A))"
+  ) + gaussian()
+  
+  m_form <- bin_mod + mass_mod + set_rescor(FALSE)
+  
+  pri <- get_prior(m_form, data2 = list(A = A), data = dat) %>%
+    mutate(
+      prior = case_when(
+        class == "b" & coef == ""                      ~ "normal(0, 2)",
+        class == "sd" & coef == "" & resp == "Locbin"  ~ "normal(0, 0.3)",
+        class == "sd" & coef == "" & resp != "Locbin"  ~ "normal(0, 1)",
+        class == "Intercept"                           ~ "normal(0, 2)",
+        class == "sigma"                               ~ "normal(0, 0.5)",
+        TRUE ~ prior
+      )
+    )
+  
+  list_b_lm[[i]] <- brm(
+    m_form,
+    data    = dat,
+    data2   = list(A = A),
+    prior   = pri,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+---
+
+# 3. Functional Ratio / Index Models
+
+Ratios and indices are dimensionless so size is not included as a covariate.
+
+## 3a. Ratios with missing data
+
+```{r}
+list_b_ratio <- vector(mode = "list")
+```
+
+```{r}
+for (i in var_missing_ratio) {
+  
+  bin_mod <- bf(
+    paste0("Loc_bin ~ mi(", i, ") + 
+            (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))")
+  ) + bernoulli()
+  
+  imp_mod <- bf(
+    paste0(i, " | mi() ~ Fl + Fdw + Fsw + Tpw + Hl + Hdw + Hpw + Hsw + Uol + Mtl +
+            (1|gr(Taxon_Upham_style, cov = A))")
+  ) + gaussian()
+  
+  m_form <- bin_mod + imp_mod + set_rescor(FALSE)
+  
+  pri <- get_prior(m_form, data2 = list(A = A), data = dat) %>%
+    mutate(
+      prior = case_when(
+        class == "b" & coef == ""                      ~ "normal(0, 2)",
+        class == "sd" & coef == "" & resp == "Locbin"  ~ "normal(0, 0.3)",
+        class == "sd" & coef == "" & resp != "Locbin"  ~ "normal(0, 1)",
+        class == "Intercept"                           ~ "normal(0, 2)",
+        class == "sigma"                               ~ "normal(0, 0.5)",
+        TRUE ~ prior
+      )
+    )
+  
+  list_b_ratio[[i]] <- brm(
+    m_form,
+    data    = dat,
+    data2   = list(A = A),
+    prior   = pri,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+## 3b. Ratios with complete data
+
+For complete ratio variables, no imputation submodel is needed. A single
+initial fit is used with update() to avoid recompiling Stan for every variable.
+
+```{r}
+# Initial model to compile Stan — update() reuses the compiled code
+p1 <- c(
+  prior(normal(0, 2), class = Intercept),
+  prior(normal(0, 2), class = b),
+  prior(normal(0, 0.3), class = sd)
+)
+
+mm <- brm(
+  Loc_bin ~ Fl + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A)),
+  data    = dat,
+  data2   = list(A = A),
+  family  = bernoulli(),
+  prior   = p1,
+  cores   = 4,
+  refresh = 0
+)
+```
+
+```{r}
+for (i in var_complete_ratio) {
+  list_b_ratio[[i]] <- update(
+    mm,
+    formula = paste0("Loc_bin ~ ", i,
+                     " + (1|Genus_species) + (1|gr(Taxon_Upham_style, cov = A))"),
+    newdata = dat,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0
+  )
+}
+```
+
+---
+
+# 4. Save Models
+
+```{r}
+list_b_lm    %>% write_rds(here("Data", "B_lm_mods_FL_scores.Rds"))
+list_b_ratio %>% write_rds(here("Data", "B_ratio_mods_FL_scores.Rds"))
+```
+
+---
+
+# 5. Predictions
+
+## 5a. Prepare prediction data
+
+```{r}
+mice <- c("Podomys_floridanus", "Ochrotomys_nuttalli",
+          "Peromyscus_gossypinus", "Peromyscus_polionotus")
+
+# These species have known Loc_bin so re_formula = NULL uses their
+# fitted species random effects rather than drawing new levels
+model_dat <- dat %>%
+  filter(Genus_species %in% mice)
+```
+
+## 5b. Generate predictions from all models
+
+```{r}
+all_mods <- c(list_b_lm, list_b_ratio)
+
+# For each model, generate predictions averaged over individuals
+# resp = "Locbin" because brms strips underscores from "Loc_bin"
+pred_all <- map_dfr(names(all_mods), function(var_name) {
+  
+  mod <- all_mods[[var_name]]
+  
+  if (is.null(mod)) {
+    warning(glue("Model for {var_name} is NULL, skipping"))
+    return(NULL)
+  }
+  
+  tryCatch({
+    mod %>%
+      add_epred_draws(
+        newdata    = model_dat,
+        resp       = "Locbin",
+        value      = "Prob_of_Climbing",
+        re_formula = NULL
+      ) %>%
+      as.data.frame() %>%
+      group_by(Genus_species, .draw) %>%
+      summarise(
+        Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(var = var_name)
+  }, error = function(e) {
+    warning(glue("Prediction failed for {var_name}: {e$message}"))
+    return(NULL)
+  })
+})
+```
+
+## 5c. Plot function
+
+```{r}
+var_acc  <- c(names(list_b_lm), names(list_b_ratio))
+n_shades <- floor(length(var_acc) / 2)
+
+shades <- data.frame(
+  xmin = seq(1.5, by = 2, length.out = n_shades),
+  xmax = seq(2.5, by = 2, length.out = n_shades),
+  ymin = -Inf,
+  ymax = Inf
+)
+
+hplot <- function(groups) {
+  pred_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(
+      var           = as.factor(var),
+      Genus_species = gsub("_", " ", Genus_species)
+    ) %>%
+    ggplot(aes(
+      y     = Prob_of_Climbing,
+      x     = fct_relevel(var, var_acc),
+      shape = Genus_species
+    )) +
+    geom_rect(
+      inherit.aes = FALSE,
+      data        = shades,
+      mapping     = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      alpha       = 0.125
+    ) +
+    geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.35, color = "grey30") +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = -0.8)
+    ) +
+    scale_y_continuous(limits = c(0, 1), expand = c(0.02, 0.02)) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    labs(x = "", y = "Probability of Climbing") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.text  = element_text(face = "italic"),
+      legend.title = element_blank()
+    ) +
+    guides(shape = guide_legend(override.aes = list(size = 8)))
+}
+```
+
+```{r}
+hplot(mice)
+
+ggsave(here("Plots", "Bin_Individual_Plots_FL_scores.pdf"), height = 8, width = 13)
+```

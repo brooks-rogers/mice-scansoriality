@@ -1,5 +1,6 @@
 ---
 title: "Binary Models — Individual Predictors"
+output: html_notebook
 ---
 
 # Overview
