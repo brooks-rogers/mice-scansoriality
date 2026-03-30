@@ -327,6 +327,12 @@ list_b_lm    %>% write_rds(here("Data", "B_lm_mods.Rds"))
 list_b_ratio %>% write_rds(here("Data", "B_ratio_mods.Rds"))
 ```
 
+read in models
+```{r}
+list_b_lm    <- read_rds(here("Data", "B_lm_mods.Rds"))
+list_b_ratio <- read_rds(here("Data", "B_ratio_mods.Rds"))
+```
+
 ---
 
 # 6. Predictions
@@ -401,14 +407,9 @@ Alternating shaded rectangles behind each variable, shape-coded by species.
 The `var_acc` vector controls x-axis ordering — define it as your preferred
 variable order before calling the function.
 ```{r}
-# Define variable display order (edit to match your preferred ordering)
-# This should match the order you want on the x-axis
-var_acc <- c(names(list_b_lm), names(list_b_ratio))
+var_acc  <- var_accurate[var_accurate %in% c(names(list_b_lm), names(list_b_ratio))]
+n_shades <- floor(length(var_acc) / 2)
 
-# Shading rectangles — alternating bands behind every other variable
-# Positions are set for up to 20 variables; trim or extend as needed
-n_vars  <- length(var_acc)
-n_shades <- floor(n_vars / 2)
 shades <- data.frame(
   xmin = seq(1.5, by = 2, length.out = n_shades),
   xmax = seq(2.5, by = 2, length.out = n_shades),
@@ -416,23 +417,19 @@ shades <- data.frame(
   ymax = Inf
 )
 
-# Plot function
-# groups: character vector of species names to include
-# method: not used in these single-predictor models but kept for consistency
-#         with the multiple regression plotting workflow
 hplot <- function(groups) {
   pred_all %>%
-    filter(Genus_species %in% groups) %>%
+    filter(Genus_species %in% groups,
+           var %in% var_accurate) %>%
     mutate(
       var           = as.factor(var),
-      Genus_species = gsub("_", " ", Genus_species)  # italics-friendly spacing
+      Genus_species = gsub("_", " ", Genus_species)
     ) %>%
     ggplot(aes(
       y     = Prob_of_Climbing,
       x     = fct_relevel(var, var_acc),
       shape = Genus_species
     )) +
-    # Alternating background shading
     geom_rect(
       inherit.aes = FALSE,
       data        = shades,
@@ -441,10 +438,10 @@ hplot <- function(groups) {
     ) +
     geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.35, color = "grey30") +
     stat_pointinterval(
-      .width   = 0.8,
-      color    = "grey15",
+      .width    = 0.8,
+      color     = "grey15",
       linewidth = 1.7,
-      position = position_dodge(width = -0.8)
+      position  = position_dodge(width = -0.8)
     ) +
     scale_y_continuous(limits = c(0, 1), expand = c(0.02, 0.02)) +
     scale_shape_manual(values = c(1, 15, 17, 19, 8)) +

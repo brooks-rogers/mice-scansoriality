@@ -1,0 +1,432 @@
+---
+title: "Morphological Distributions by Species"
+
+---
+
+# Overview
+
+This script fits a series of Bayesian distributional regression models to
+estimate the distribution of each skeletal measurement across four focal
+Florida rodent species. One model is fit per variable in `var_accurate`.
+
+All variables use the same model structure:
+  - mu    ~ 0 + Genus_species
+  - sigma ~ 0 + Genus_species
+
+Size-standardized linear measurements are represented as log-shape ratios
+(e.g. lsPpl = log(Ppl / gm)), which remove the effect of body size by
+construction. This unifies the model framework — no separate mass imputation
+or size-correction step needed.
+
+---
+
+# 1. Setup
+
+```{r message = FALSE, warning=FALSE, include = FALSE}
+pacman::p_load(tidyverse, brms, cmdstanr, here, tidybayes, 
+               patchwork, glue, ggthemes)
+
+options(brms.backend = "cmdstanr")
+
+here::i_am("README.md")
+here()
+```
+
+```{r}
+dat <- read_csv(here("Data", "MouseMeasurements.csv")) |> 
+  mutate(Genus_species = str_remove_all(Genus_species, " ")) |> 
+  select(catalog:Pppl) |> 
+  mutate(
+    MANUS = Ppl/Mcl,
+    HRI   = Hsw/Hl,
+    HPI   = Hpw/Hl,
+    HEB   = Hdw/Hl,
+    OLI   = Uol/Ul,
+    BI    = Rl/Hl,
+    IM    = (Hl+Ul)/(Fl+Tl),
+    PRTI  = Mcl/(Hl+Rl),
+    FRI   = Fsw/Fl,
+    FEB   = Fdw/Fl,
+    CI    = Tl/Fl,
+    TRI   = Tmw/Tl,
+    PES   = Pppl/Mtl
+  ) |> 
+  mutate(gm = (Hl * Fl * Ul * Rl) ^ (1/4),
+         HBL = TotL - Tail) |> 
+  # Log-shape ratios: size-standardized linear measurements
+  mutate(
+    lsHl   = log(Hl   / gm),
+    lsHsw  = log(Hsw  / gm),
+    lsHdw  = log(Hdw  / gm),
+    lsHpw  = log(Hpw  / gm),
+    lsUol  = log(Uol  / gm),
+    lsUl   = log(Ul   / gm),
+    lsRl   = log(Rl   / gm),
+    lsFl   = log(Fl   / gm),
+    lsFsw  = log(Fsw  / gm),
+    lsFdw  = log(Fdw  / gm),
+    lsTmw  = log(Tl   / gm),
+    lsPppl = log(Pppl / gm),
+    lsMtl  = log(Mtl  / gm),
+    lsPpl  = log(Ppl  / gm)
+  ) |> 
+  #mutate_at(vars(Fl:Pppl), log) |>
+  mutate(pred_data = "T") |> 
+  select(!Usw) |>
+  filter(catalog != "U20988*") |> 
+  mutate(Genus_species = factor(Genus_species, levels = mice))
+```
+
+```{r}
+# Variable sets
+var_accurate <- read_rds(here("Data", "var_accurate.Rds"))
+
+# Log-shape ratio versions of formerly size-controlled variables
+vars_lsr <- c("lsPpl", "lsHl", "lsRl", "lsUol", "lsFl", "lsUl")
+
+# Dimensionless indices — unchanged
+vars_idx <- c("HPI", "PES", "MANUS", "OLI")
+
+# Combined variable set for modeling
+vars_all <- c(vars_lsr, vars_idx)
+
+# Restrict to those present in var_accurate if needed
+# (comment out if var_accurate doesn't include ls-prefixed names)
+# vars_all <- vars_all[vars_all %in% var_accurate]
+
+# Color palette
+pal <- c('#62361B', '#f48a1a', '#e6ab02', '#66a61e', '#31c1bb', 
+         '#0d57ff', '#5e1ea6', '#f9581c', '#f384f8')
+```
+
+---
+
+# 2. Fit Models
+
+Single distributional regression framework for all variables.
+`mu` and `sigma` both vary by species. Using `0 + Genus_species` suppresses
+the intercept so each species gets its own coefficient directly — no
+reference-level contrast. This makes posterior extraction straightforward.
+
+```{r}
+p <- c(
+  prior(normal(0, 2),   class = b, dpar = ""),
+  prior(normal(0, 0.5), class = b, dpar = "sigma")
+)
+
+dist_mods <- vector(mode = "list")
+
+# Compile initial model — update() reuses this Stan executable for all variables
+mm <- brm(
+  bf(HPI ~ 0 + Genus_species, sigma ~ 0 + Genus_species),
+  data    = dat,
+  family  = gaussian(),
+  prior   = p,
+  cores   = 4,
+  seed    = 145,
+  refresh = 0,
+  silent  = 2
+)
+
+for (i in vars_all) {
+  
+  n_obs <- dat %>% pull(all_of(i)) %>% na.omit() %>% length()
+  if (n_obs < 10) {
+    warning(glue("Skipping {i}: only {n_obs} non-NA observations"))
+    next
+  }
+  
+  dist_mods[[i]] <- update(
+    mm,
+    formula = bf(
+      as.formula(paste0(i, " ~ 0 + Genus_species")),
+      as.formula("sigma ~ 0 + Genus_species")
+    ),
+    newdata = dat,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+```{r}
+dist_mods %>% write_rds(here("Data", "dist_mods.Rds"))
+```
+
+---
+
+# 3. Extract Posterior Draws
+
+With `0 + Genus_species` parameterization, each species has its own named
+coefficient. We extract these directly using `spread_draws()` — no prediction
+step needed.
+
+```{r}
+post_all <- map_dfr(names(dist_mods), function(var_name) {
+  
+  mod <- dist_mods[[var_name]]
+  if (is.null(mod)) return(NULL)
+  
+  newdata <- dat %>% 
+    distinct(Genus_species) %>% 
+    filter(!is.na(Genus_species))
+  
+  tryCatch({
+    mod %>%
+      predicted_draws(newdata = newdata) %>%
+      as.data.frame() %>%
+      rename(value = .prediction) %>%
+      mutate(var = var_name) %>%
+      select(.draw, Genus_species, value, var)
+  }, error = function(e) {
+    warning(glue("Draw extraction failed for {var_name}: {e$message}"))
+    return(NULL)
+  })
+})
+
+```
+
+
+# 3b. Measurement Score Card
+
+```{r}
+post_all %>%
+  group_by(var, Genus_species) %>%
+  summarise(mean = mean(value), .groups = "drop") %>%
+  pivot_wider(names_from = Genus_species, values_from = mean) %>%
+  mutate(Ochrotomys_diff = Ochrotomys_nuttalli - rowMeans(across(c(Podomys_floridanus, 
+                                                                    Peromyscus_gossypinus, 
+                                                                    Peromyscus_polionotus))))
+```
+
+---
+
+# 4. Plot
+
+```{r}
+# Variable order for plotting
+# If var_accurate has ls-prefixed names, use it; otherwise use vars_all order
+var_plot_order <- vars_all  # adjust if var_accurate contains the ls names
+
+n_shades <- floor(length(var_plot_order) / 2)
+
+shades <- data.frame(
+  xmin = seq(1.5, by = 2, length.out = n_shades),
+  xmax = seq(2.5, by = 2, length.out = n_shades),
+  ymin = -Inf,
+  ymax = Inf
+)
+
+# Raw data in long format for jittered points
+dat_long <- dat %>%
+  select(Genus_species, catalog, all_of(var_plot_order)) %>%
+  pivot_longer(
+    cols      = all_of(var_plot_order),
+    names_to  = "var",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value)) %>%
+  group_by(var) %>%
+  mutate(value = scale(value)[, 1]) %>%
+  ungroup() %>%
+  mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+```
+
+
+
+```{r}
+morpho_plot <- function(groups) {
+  
+  ppred_plot <- post_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  
+  raw_plot <- dat_long %>%
+    filter(gsub(" ", "_", Genus_species) %in% groups)
+  
+  ppred_plot %>%
+    ggplot(aes(
+      x     = fct_relevel(var, var_plot_order),
+      y     = value,
+      shape = Genus_species
+    )) +
+    geom_rect(
+      inherit.aes = FALSE,
+      data        = shades,
+      mapping     = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      alpha       = 0.125
+    ) +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = 0.5)
+    ) +
+    geom_point(
+      data    = raw_plot,
+      mapping = aes(x = fct_relevel(var, var_plot_order), y = value,
+                    shape = Genus_species),
+      position = position_jitterdodge(dodge.width = 0.5, jitter.width = 0.1,
+                                      jitter.height = 0),
+      size  = 1.5,
+      alpha = 0.5,
+      color = "grey30"
+    ) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    labs(x = "", y = "Z-score") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.text  = element_text(face = "italic"),
+      legend.title = element_blank()
+    ) +
+    guides(shape = guide_legend(override.aes = list(size = 4)))
+}
+
+morpho_plot_clean <- function(groups) {
+  
+  ppred_plot <- post_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  
+  ppred_plot %>%
+    ggplot(aes(
+      x     = fct_relevel(var, var_plot_order),
+      y     = value,
+      shape = Genus_species
+    )) +
+    geom_rect(
+      inherit.aes = FALSE,
+      data        = shades,
+      mapping     = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      alpha       = 0.125
+    ) +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = 0.5)
+    ) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    labs(x = "", y = "Z-score") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.text  = element_text(face = "italic"),
+      legend.title = element_blank()
+    ) +
+    guides(shape = guide_legend(override.aes = list(size = 4)))
+}
+```
+
+```{r}
+morpho_plot(mice)
+ggsave(here("Plots", "Morpho_Distributions.pdf"), height = 8, width = 13)
+
+morpho_plot_clean(mice)
+ggsave(here("Plots", "Morpho_Distributions_no_points.pdf"), height = 8, width = 13)
+```
+
+
+```{r}
+# Faceted by variable — 2x5 grid, one panel per variable, species on x-axis
+morpho_plot_byvar <- function(groups) {
+  
+  ppred_plot <- post_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  
+  raw_plot <- dat_long %>%
+    filter(gsub(" ", "_", Genus_species) %in% groups)
+  
+  ppred_plot %>%
+    ggplot(aes(
+      x     = Genus_species,
+      y     = value,
+      shape = Genus_species
+    )) +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = 0.5)
+    ) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    facet_wrap(~ var, scales = "free_y", nrow = 2) +
+    labs(x = "", y = "Z-score") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1, face = "italic", size = 7),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.position = "none",
+      strip.background = element_blank()
+    )
+}
+
+morpho_plot_byvar(mice)
+ggsave(here("Plots", "Morpho_Distributions_byvar.pdf"), height = 8, width = 13)
+```
+
+#5. Post Means and Contrasts
+
+```{r}
+post_means <- map_dfr(names(dist_mods), function(var_name) {
+  dist_mods[[var_name]] %>%
+    spread_draws(`b_Genus_species.*`, regex = TRUE) %>%
+    pivot_longer(
+      starts_with("b_Genus_species"),
+      names_to  = "Genus_species",
+      values_to = "value"
+    ) %>%
+    mutate(
+      Genus_species = str_remove(Genus_species, "b_Genus_species"),
+      var           = var_name
+    ) %>%
+    select(.draw, Genus_species, value, var)
+})
+
+contrasts <- post_means %>%
+  pivot_wider(names_from = Genus_species, values_from = value) %>%
+  group_by(var) %>%
+  summarise(
+    vs_Podomys    = mean(Ochrotomys_nuttalli > Podomys_floridanus),
+    vs_gossypinus = mean(Ochrotomys_nuttalli > Peromyscus_gossypinus),
+    vs_polionotus = mean(Ochrotomys_nuttalli > Peromyscus_polionotus)
+  ) %>%
+  mutate(
+    predicted_higher = var %in% c("MANUS", "PES", "lsHl", "lsPpl", "lsRl", "lsUl"),
+    across(starts_with("vs_"), ~ if_else(predicted_higher, .x, 1 - .x),
+           .names = "{.col}_directional")
+  )
+```
+
+
+```{r}
+pairs <- combn(unique(post_means$Genus_species), 2, simplify = FALSE)
+
+diffs_all <- map_dfr(pairs, function(p) {
+  post_means %>%
+    filter(Genus_species %in% p) %>%
+    pivot_wider(names_from = Genus_species, values_from = value) %>%
+    mutate(diff = .data[[p[1]]] - .data[[p[2]]],
+           comparison = paste(p[1], "vs", p[2])) %>%
+    select(var, .draw, diff, comparison)
+}) %>%
+  mutate(comparison = str_replace_all(comparison, 
+                                      "Peromyscus_|Ochrotomys_|Podomys_", ""))
+
+diffs_all %>%
+  ggplot(aes(x = diff, y = comparison)) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  stat_pointinterval(.width = 0.89) +
+  facet_wrap(~ var, nrow = 2, scales = "free_x") +
+  labs(x = "Posterior difference", y = "") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7))
+```
+

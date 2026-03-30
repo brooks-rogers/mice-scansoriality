@@ -1,0 +1,630 @@
+---
+title: "Morphological Distributions by Species"
+output: html_notebook
+---
+
+# Overview
+
+This script fits a series of Bayesian distributional regression models to
+estimate the distribution of each skeletal measurement across four focal
+Florida rodent species. One model is fit per variable in `var_accurate`.
+
+Model structure varies by variable type:
+
+Size-controlled variables (Ppl, Hl, Rl, Uol, Fl, Ul):
+  - mu    ~ 0 + Genus_species + log_Mass
+  - sigma ~ 0 + Genus_species
+  - Missing log_Mass values are filled in beforehand using a standalone
+    mass prediction model fit to the full dataset
+
+Non-size-controlled variables (HPI, PES, MANUS, OLI):
+  - mu    ~ Genus_species
+  - sigma ~ Genus_species
+
+Predictions use species mean log_Mass for the size-controlled variables,
+so intervals reflect morphological variation at a typical body size for
+each species rather than being confounded by mass differences.
+
+---
+
+# 1. Setup
+
+```{r message = FALSE, warning=FALSE, include = FALSE}
+pacman::p_load(tidyverse, brms, cmdstanr, here, tidybayes, 
+               patchwork, glue, ggthemes)
+
+options(brms.backend = "cmdstanr")
+
+here::i_am("README.md")
+here()
+```
+
+```{r}
+dat <-  read_csv(here("Data", "MouseMeasurements.csv")) |> 
+  mutate(Genus_species = str_remove_all(Genus_species, " ")) |> 
+  #this selects all columns from `catalog` to `Date`, removing the last ones
+  select(catalog:Pppl) |> 
+  # Make indices
+  mutate(
+    MANUS = Ppl/Mcl,      #MANUS Index
+    HRI = Hsw/Hl,         #Humeral Robustness Index
+    HPI = Hpw/Hl,         #Humeral Proximal Index
+    HEB = Hdw/Hl,         #Humeral Epicondyle Breadth
+    OLI = Uol/Ul,         #Olecranon Process Length Index
+    BI = Rl/Hl,            #Brachial Index
+    IM = (Hl+Ul)/(Fl+Tl), #Intermembral Index
+    PRTI = Mcl/(Hl+Rl),   #Palm Robustness Index
+    FRI = Fsw/Fl,         #Femoral Robustness
+    FEB = Fdw/Fl,         #Femoral Epicondyle Breadth
+    CI = Tl/Fl,           #Crural Index
+    TRI = Tmw/Tl,         #Tibial Robustness Index
+    PES = Pppl/Mtl) |>        #PES Index
+  mutate(gm = ( Fl * Fdw * Fsw * Tpw * Hl * Hdw * Hpw * Hsw) ^ (1/8)) |> 
+  #log transforms all linear variables
+  mutate_at(vars(Fl:Pppl), log) |>
+  #creates a new column telling us this is the prediciton data
+  mutate(pred_data = "T") |> 
+  #removes this measurement
+  select(!Usw) %>%
+  filter(catalog != "U20988*") |> 
+  mutate(Genus_species = factor(Genus_species, levels = mice))
+   
+```
+
+
+```{r}
+# Variable sets
+var_accurate <- read_rds(here("Data", "var_accurate.Rds"))
+
+# Split into size-controlled and non-size-controlled
+# Size-controlled: linear measurements where body size is a meaningful covariate
+# Non-size-controlled: ratios/indices that are dimensionless by construction
+vars_size_controlled <- c("Ppl", "Hl", "Rl", "Uol", "Fl", "Ul")
+vars_no_size         <- c("HPI", "PES", "MANUS", "OLI")
+
+# Keep only those present in var_accurate
+vars_size_controlled <- vars_size_controlled[vars_size_controlled %in% var_accurate]
+vars_no_size         <- vars_no_size[vars_no_size %in% var_accurate]
+
+#"Fl", "Fdw", "Tpw", "Hl", "Hdw", "Hpw", "Hsw", "log_Mass"
+# Color palette
+pal <- c('#62361B', '#f48a1a', '#e6ab02', '#66a61e', '#31c1bb', 
+         '#0d57ff', '#5e1ea6', '#f9581c', '#f384f8')
+```
+
+---
+
+# 2. Fit Models
+
+## 2a.
+
+Standalone mass prediction model
+
+Before fitting the size-controlled morphology models, we need to fill in
+missing mass values for focal specimens. A standalone regression model
+is fit to the full dataset (all species) to predict log_Mass from skeletal
+measurements. Posterior means are then used to impute missing values in
+dat_mice — simpler than the full mi() joint model and sufficient here since
+we only need a point estimate per specimen.
+
+```{r}
+# Fit mass model to full dataset so all species inform the regression
+# Predictors are the same complete skeletal measurements used elsewhere
+
+mass_mod <- brm(
+  mass_g ~ Hl + Hsw + Hdw + Uol + Ul + Rl + Fl + Fsw + Fdw,
+  family  = gaussian(),
+  data    = dat,       # full dataset, not just focal species
+ # prior   = p_mass,
+  cores   = 4,
+  seed    = 145,
+  refresh = 0,
+  silent  = 2
+)
+
+```
+
+```{r}
+# Identify focal specimens with missing log_Mass
+missing_mass <- dat %>%
+  filter(is.na(mass_g)) %>%
+  select(catalog, Genus_species, Hl, Hsw, Hdw, Uol, Ul, Rl, Fl, Fsw, Fdw)
+
+# Get posterior mean log_Mass predictions for those specimens
+# add_epred_draws() gives the expected value (mu), averaged over draws
+mass_imputed <- mass_mod %>%
+  add_epred_draws(newdata = missing_mass) %>%
+  as.data.frame() %>%
+  group_by(catalog) %>%
+  summarise(mass_g_imputed = mean(.epred), .groups = "drop")
+
+# Fill in missing log_Mass values with imputed posterior means
+dat_mice <- dat %>%
+  left_join(mass_imputed, by = "catalog") %>%
+  mutate(mass_g = coalesce(mass_g, mass_g_imputed)) %>%
+  select(-mass_g_imputed) |>
+  mutate(log_Mass = log(mass_g), 
+         log_gm = log(gm),
+         lsHl = log(Hl/gm),
+         lsHsw = log(Hsw/gm),
+         lsHdw = log(Hdw/gm),
+         lsHpw = log(Hpw/gm),
+         lsUol = log(Uol/gm),
+         lsUl = log(Ul/gm),
+         lsRl = log(Rl/gm),
+         lsFl = log(Fl/gm),
+         lsFsw = log(Fsw/gm),
+         lsFdw = log(Fdw/gm),
+         lsTmw = log(Tl/gm),
+         lsPppl = log(Pppl/gm),
+         lsMtl = log(Mtl/gm),
+         lsPpl = log(Ppl/gm)) |> 
+    #log transforms all linear variables
+  mutate_at(vars(Fl:Pppl), log) 
+
+dat_mice |> ggplot(aes(x = Genus_species, y = lsPpl)) + 
+  geom_point()
+```
+
+Simple distributional regression: mu and sigma both vary by species.
+Using 0 + Genus_species suppresses the intercept so each species gets its
+own coefficient directly — no reference-level contrast. This makes posterior
+extraction straightforward: one b_Genus_species* column per species.
+
+```{r}
+# With 0 + parameterization there is no Intercept class — all species
+# means are in class = b. sigma still gets its own Intercept (for the
+# reference species) plus b coefficients for the others.
+p_no_size <- c(
+  prior(normal(0, 2),   class = b, dpar = ""),
+  prior(normal(0, 0.5), class = b, dpar = "sigma")
+)
+
+dist_mods_no_size <- vector(mode = "list")
+
+# Compile initial model — update() reuses this for all non-size variables
+mm_no_size <- brm(
+  bf(HPI ~ 0 + Genus_species, sigma ~ 0 + Genus_species),
+  data    = dat_mice,
+  family  = gaussian(),
+  prior   = p_no_size,
+  cores   = 4,
+  seed    = 145,
+  refresh = 0,
+  silent  = 2
+)
+
+for (i in vars_no_size) {
+  
+  n_obs <- dat_mice %>% pull(all_of(i)) %>% na.omit() %>% length()
+  if (n_obs < 10) {
+    warning(glue("Skipping {i}: only {n_obs} non-NA observations"))
+    next
+  }
+  
+  dist_mods_no_size[[i]] <- update(
+    mm_no_size,
+    formula = bf(
+      as.formula(paste0(i, " ~ 0 + Genus_species")),
+      as.formula("sigma ~ 0 + Genus_species")
+    ),
+    newdata = dat_mice,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+## 2b. 
+Simple distributional regression: mu and sigma both vary by species.
+Using 0 + Genus_species suppresses the intercept so each species gets its
+own coefficient directly — no reference-level contrast. This makes posterior
+extraction straightforward: one b_Genus_species* column per species.
+
+
+```{r}
+
+p <- c(
+  prior(normal(0, 1), class = b, dpar = ""),
+  prior(normal(0, 0.5), class = b, dpar = "sigma"))
+
+m0 <- brm(bf(log_Mass ~  0 + Genus_species, sigma ~ 0 + Genus_species),
+          data = dat_mice, 
+          prior = p,
+          cores   = 4,
+          seed    = 145,
+          refresh = 0,
+          silent  = 2,
+          refresh = 0)
+
+m1 <-  update(m0, bf(HPI ~  0 + Genus_species, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m2 <- update(m0, bf(PES ~  0 + Genus_species, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m3 <- update(m0, bf(MANUS ~  0 + Genus_species, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m4 <- update(m0, bf(OLI ~  0 + Genus_species, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m5 <- update(m0, bf(Ppl ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m6 <- update(m0, bf(Hl ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m7 <- update(m0, bf(Rl ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m8 <- update(m0, bf(Uol ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m9 <- update(m0, bf(Fl ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+m10 <- update(m0, bf(Ul ~  0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+              newdata = dat_mice, prior = p, cores= 4, seed = 145, refresh = 0, silent  = 2)
+
+```
+
+```{r}
+d <- bind_rows("log_Mass" = posterior_samples(m0),
+               "HPI" = posterior_samples(m1), 
+               "PES" = posterior_samples(m2),
+               "MANUS" = posterior_samples(m3),
+               "OLI" = posterior_samples(m4),
+               "Ppl" = posterior_samples(m5),
+               "Hl" = posterior_samples(m6),
+               "Rl" = posterior_samples(m7),
+               "Uol" = posterior_samples(m8),
+               "Fl" = posterior_samples(m9),
+               "Ul" = posterior_samples(m10),
+               .id = "var") %>% 
+  select(!c(lprior, lp__, b_log_Mass, starts_with("b_sigma"))) %>% 
+  rename_with(str_sub, start = 16L, .cols = starts_with("b_Genus_species")) %>% 
+  #mutate_at(15:26, scale2, na.rm = TRUE) %>% 
+  pivot_longer(!var, names_to = "species", values_to = "val") %>% 
+  group_by(var) %>% 
+  mutate(val = scale2(val)) %>% ungroup() 
+```
+
+```{r}
+d %>% 
+    ggplot(aes(x = species, y = val)) +
+    stat_pointinterval(.width = c(.60, .89), 
+                       point_size = 1.5) +
+    geom_hline(yintercept = 0, linetype = 3, size = 0.3) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 0.1))+
+    facet_wrap( ~var,
+               scales = 'free', ncol = 4) + 
+    theme_bw() +
+    labs(y = "Measurement Estimate (Scaled)", x = "") +
+    theme(axis.text.x= element_text(angle=35,hjust=1, face = "italic"),
+          strip.background = element_blank()) 
+```
+
+
+```{r}
+# With 0 + parameterization there is no Intercept class — all species
+# means are in class = b. sigma still gets its own Intercept (for the
+# reference species) plus b coefficients for the others.
+p_no_size <- c(
+  prior(normal(0, 2),   class = b, dpar = ""),
+  prior(normal(0, 0.5), class = b, dpar = "sigma")
+)
+
+dist_mods_no_size <- vector(mode = "list")
+
+# Compile initial model — update() reuses this for all non-size variables
+mm_no_size <- brm(
+  bf(HPI ~ 0 + Genus_species, sigma ~ 0 + Genus_species),
+  data    = dat_mice,
+  family  = gaussian(),
+  prior   = p_no_size,
+  cores   = 4,
+  seed    = 145,
+  refresh = 0,
+  silent  = 2
+)
+
+for (i in vars_no_size) {
+  
+  n_obs <- dat_mice %>% pull(all_of(i)) %>% na.omit() %>% length()
+  if (n_obs < 10) {
+    warning(glue("Skipping {i}: only {n_obs} non-NA observations"))
+    next
+  }
+  
+  dist_mods_no_size[[i]] <- update(
+    mm_no_size,
+    formula = bf(
+      as.formula(paste0(i, " ~ 0 + Genus_species")),
+      as.formula("sigma ~ 0 + Genus_species")
+    ),
+    newdata = dat_mice,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+
+```
+
+
+## 2c. Size-controlled distributional models
+
+Now that log_Mass is complete for all focal specimens, these models are
+straightforward — no mi() needed. Using 0 + Genus_species so each species
+gets its own intercept directly, with log_Mass as a shared slope covariate.
+update() works since all share the same formula structure.
+
+```{r}
+p_size <- c(
+  prior(normal(0, 2),   class = b,         dpar = ""),
+  prior(normal(0, 0.5), class = b,         dpar = "sigma")
+)
+
+dist_mods_size <- vector(mode = "list")
+
+# Compile initial model — update() reuses this for all size-controlled variables
+mm_size <- brm(
+  bf(Fl ~ 0 + Genus_species + log_Mass, sigma ~ 0 + Genus_species),
+  data    = dat_mice,
+  family  = gaussian(),
+  prior   = p_size,
+  cores   = 4,
+  seed    = 145,
+  refresh = 0,
+  silent  = 2
+)
+
+for (i in vars_size_controlled) {
+  
+  n_obs <- dat_mice %>% pull(all_of(i)) %>% na.omit() %>% length()
+  if (n_obs < 10) {
+    warning(glue("Skipping {i}: only {n_obs} non-NA observations"))
+    next
+  }
+  
+  dist_mods_size[[i]] <- update(
+    mm_size,
+    formula = bf(
+      as.formula(paste0(i, " ~ 0 + Genus_species + log_Mass")),
+      as.formula("sigma ~ 0 + Genus_species")
+    ),
+    newdata = dat_mice,
+    cores   = 4,
+    seed    = 145,
+    refresh = 0,
+    silent  = 2
+  )
+}
+```
+
+```{r}
+mass_mod          %>% write_rds(here("Data", "mass_mod.Rds"))
+dist_mods_no_size %>% write_rds(here("Data", "dist_mods_no_size.Rds"))
+dist_mods_size    %>% write_rds(here("Data", "dist_mods_size.Rds"))
+```
+
+---
+
+# 3. Extract Posterior Draws
+
+With 0 + Genus_species parameterization, each species has its own named
+coefficient (b_Genus_speciesOchrotomys_nuttalli, etc.). We extract these
+directly using spread_draws() — no prediction step needed. This gives the
+posterior distribution of the species mean for each variable, already
+size-adjusted for the size-controlled variables.
+
+The species name cleanup (removing "b_Genus_species" prefix) is done with
+str_remove() to recover clean Genus_species labels for plotting.
+
+## 3a. Non-size-controlled variables
+
+```{r}
+post_no_size <- map_dfr(names(dist_mods_no_size), function(var_name) {
+  
+  mod <- dist_mods_no_size[[var_name]]
+  if (is.null(mod)) return(NULL)
+  
+  tryCatch({
+    mod %>%
+      spread_draws(`b_Genus_species.*`, regex = TRUE) %>%
+      pivot_longer(
+        starts_with("b_Genus_species"),
+        names_to  = "Genus_species",
+        values_to = "value"
+      ) %>%
+      mutate(
+        Genus_species = str_remove(Genus_species, "b_Genus_species"),
+        var           = var_name
+      ) %>%
+      select(.draw, Genus_species, value, var)
+  }, error = function(e) {
+    warning(glue("Draw extraction failed for {var_name}: {e$message}"))
+    return(NULL)
+  })
+})
+```
+
+## 3b. Size-controlled variables
+
+For these models the b_Genus_species coefficients are the species means at
+log_Mass = 0 (the grand mean on the z-score scale). Because all species are
+evaluated at the same mass value, size is held constant and comparisons
+reflect shape differences only.
+
+## 3b. Size-controlled variables
+
+For these models we predict at each individual's own log_Mass, then average
+draws within species. This marginalizes over the observed mass distribution
+of each species rather than conditioning on a single reference value —
+so the species-level posterior reflects what you'd expect for a typical
+individual of that species at its actual size.
+```{r}
+ppred_size <- map_dfr(names(dist_mods_size), function(var_name) {
+  
+  mod <- dist_mods_size[[var_name]]
+  if (is.null(mod)) return(NULL)
+  
+  tryCatch({
+    mod %>%
+      predicted_draws(
+        newdata = dat_mice %>%
+          select(Genus_species, catalog, log_Mass) %>%
+          filter(!is.na(log_Mass))
+      ) %>%
+      as.data.frame() %>%
+      group_by(Genus_species, .draw) %>%
+      summarise(value = mean(.prediction, na.rm = TRUE), .groups = "drop") %>%
+      mutate(var = var_name)
+  }, error = function(e) {
+    warning(glue("Prediction failed for {var_name}: {e$message}"))
+    return(NULL)
+  })
+})
+
+# Combine both sets
+ppred_all <- bind_rows(post_no_size, ppred_size)
+```
+
+
+---
+
+# 4. Plot
+
+```{r}
+# Variable order — preserve var_accurate ordering, restricted to modeled variables
+var_acc_dist <- var_accurate[var_accurate %in% c(names(dist_mods_no_size),
+                                                   names(dist_mods_size))]
+n_shades <- floor(length(var_acc_dist) / 2)
+
+shades <- data.frame(
+  xmin = seq(1.5, by = 2, length.out = n_shades),
+  xmax = seq(2.5, by = 2, length.out = n_shades),
+  ymin = -Inf,
+  ymax = Inf
+)
+
+# Raw data in long format for jittered points
+dat_long <- dat_mice %>%
+  select(Genus_species, catalog, all_of(var_acc_dist)) %>%
+  pivot_longer(
+    cols      = all_of(var_acc_dist),
+    names_to  = "var",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value)) %>%
+  group_by(var) %>%
+  mutate(value = scale(value)[,1]) %>%   # z-score within variable
+  ungroup() %>%
+  mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+```
+
+```{r}
+# Plot with raw jittered points overlaid
+# Both stat_pointinterval and geom_point use the same dodge.width = 0.5
+# to ensure species are aligned across layers
+morpho_plot <- function(groups) {
+  
+  ppred_plot <- ppred_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  
+  raw_plot <- dat_long %>%
+    filter(gsub(" ", "_", Genus_species) %in% groups)
+  
+  ppred_plot %>%
+    ggplot(aes(
+      x     = fct_relevel(var, var_acc_dist),
+      y     = value,
+      shape = Genus_species
+    )) +
+    geom_rect(
+      inherit.aes = FALSE,
+      data        = shades,
+      mapping     = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      alpha       = 0.125
+    ) +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = 0.5)
+    ) +
+    geom_point(
+      data     = raw_plot,
+      mapping  = aes(x = fct_relevel(var, var_acc_dist), y = value,
+                     shape = Genus_species),
+      position = position_jitterdodge(dodge.width = 0.5, jitter.width = 0.1,
+                                      jitter.height = 0),
+      size     = 1.5,
+      alpha    = 0.5,
+      color    = "grey30"
+    ) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    labs(x = "", y = "Z-score") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.text  = element_text(face = "italic"),
+      legend.title = element_blank()
+    ) +
+    guides(shape = guide_legend(override.aes = list(size = 4)))
+}
+
+# Clean version without raw points
+morpho_plot_clean <- function(groups) {
+  
+  ppred_plot <- ppred_all %>%
+    filter(Genus_species %in% groups) %>%
+    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  
+  raw_plot <- dat_long %>%
+    filter(gsub(" ", "_", Genus_species) %in% groups)
+  
+  ppred_plot %>%
+    ggplot(aes(
+      x     = fct_relevel(var, var_acc_dist),
+      y     = value,
+      shape = Genus_species
+    )) +
+    geom_rect(
+      inherit.aes = FALSE,
+      data        = shades,
+      mapping     = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      alpha       = 0.125
+    ) +
+    stat_pointinterval(
+      .width    = 0.8,
+      color     = "grey15",
+      linewidth = 1.7,
+      position  = position_dodge(width = 0.5)
+    ) +
+    scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+    labs(x = "", y = "Z-score") +
+    theme_pander(gM = FALSE) +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+      legend.text  = element_text(face = "italic"),
+      legend.title = element_blank()
+    ) +
+    guides(shape = guide_legend(override.aes = list(size = 4)))
+}
+```
+
+```{r}
+morpho_plot(mice)
+ggsave(here("Plots", "Morpho_Distributions.pdf"), height = 8, width = 13)
+
+morpho_plot_clean(mice)
+ggsave(here("Plots", "Morpho_Distributions_no_points.pdf"), height = 8, width = 13)
+```

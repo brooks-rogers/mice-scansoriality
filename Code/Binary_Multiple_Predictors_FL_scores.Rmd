@@ -136,37 +136,54 @@ model_dat <- dat %>%
 
 ---
 
-# 5. Full Predictions (individual specimens)
+# 5. Predictions — Multiple Methods
+
+Four prediction approaches are compared to decompose the contributions of the
+species random effect, phylogenetic random effect, and fixed effects (morphology):
+
+- Full:        both species RE and phylogenetic RE included
+- Species_RE:  species RE only (no phylogenetic covariance)
+- Phylo_only:  phylogenetic RE only (no species RE)
+- Fixed_only:  fixed effects (morphology) only — re_formula = NA
+
+Because the FL species are in the training data, the Full predictions will be
+very confident (the model has direct locomotion information for these species).
+The Fixed_only predictions are the most informative for understanding what
+morphology alone is contributing.
 
 ```{r}
-# Note: resp is now "Locbin" since brms strips underscores from "Loc_bin"
-pred_df_ext_full <- multmod %>% 
-  add_epred_draws(
-    newdata    = model_dat, 
-    resp       = "Locbin",
-    value      = "Prob_of_Climbing",
-    re_formula = NULL
-  ) %>% 
-  as.data.frame() %>% 
-  select(Genus_species, Prob_of_Climbing, catalog)
+# Helper function to generate species-averaged predictions for a given re_formula
+get_pred_species <- function(re_form, method_label, allow_new = FALSE) {
+  multmod %>%
+    add_epred_draws(
+      newdata          = model_dat,
+      resp             = "Locbin",
+      value            = "Prob_of_Climbing",
+      re_formula       = re_form,
+      allow_new_levels = allow_new
+    ) %>%
+    as.data.frame() %>%
+    group_by(Genus_species, .draw) %>%
+    summarise(Prob_of_Climbing = mean(Prob_of_Climbing, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(method = method_label)
+}
 
-# Plot individual specimens sorted by species and mean prediction
-pred_df_ext_full %>%
-  group_by(catalog, Genus_species) %>%
-  mutate(mean_prob = mean(Prob_of_Climbing, na.rm = TRUE)) %>%
-  ungroup() %>%
-  mutate(
-    catalog = reorder(catalog, mean_prob),
-    catalog = reorder(catalog, as.numeric(factor(Genus_species)))
-  ) %>%
-  ggplot(aes(y = Prob_of_Climbing, x = catalog, color = Genus_species)) +
-  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
-  stat_pointinterval(.width = c(0.5, 0.89)) +
-  ylim(0, 1) +
-  labs(x = "", y = "Probability of Climbing") +
-  scale_color_manual(values = pal) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Full model — both random effects
+pred_full <- get_pred_species(NULL, "Full")
+
+# Species RE only — drops phylogenetic covariance
+pred_species_only <- get_pred_species(~(1|Genus_species), "Species_RE")
+
+# Phylogenetic RE only — drops species identity
+pred_phylo_only <- get_pred_species(~(1|gr(Taxon_Upham_style, cov = A)), "Phylo_only")
+
+# Fixed effects only — morphology alone, no random effects
+pred_fixef <- get_pred_species(NA, "Fixed_only")
+
+# Combine all methods
+pred_all_methods <- bind_rows(pred_full, pred_species_only, pred_phylo_only, pred_fixef) %>%
+  mutate(method = factor(method, levels = c("Full", "Species_RE", "Phylo_only", "Fixed_only")))
 ```
 
 ---
@@ -285,7 +302,32 @@ pred_proper <- map(seq_along(chunks), ~{
 
 # 7. Plots
 
-## Individual specimen predictions
+## 7a. Method comparison — species-level predictions
+
+Four panels showing how predictions change as random effects are added.
+The Full model will be tightly near 0/1 since locomotion is known for these
+species. Fixed_only is the most informative for what morphology alone predicts.
+
+```{r}
+pred_all_methods %>%
+  ggplot(aes(y = Prob_of_Climbing, x = method, color = Genus_species)) +
+  geom_hline(yintercept = 0.5, linetype = 2, linewidth = 0.5) +
+  stat_pointinterval(
+    .width   = c(0.5, 0.89),
+    position = position_dodge(width = 0.4)
+  ) +
+  ylim(0, 1) +
+  facet_wrap(~Genus_species) +
+  labs(x = "", y = "Probability of Climbing") +
+  scale_color_manual(values = pal) +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+## 7b. Individual specimen predictions (full model, imputation-aware)
 
 ```{r}
 pred_proper %>%
@@ -306,7 +348,7 @@ pred_proper %>%
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-## Species-level predictions (averaged over individuals)
+## 7c. Species-level predictions (imputation-aware, averaged over individuals)
 
 ```{r}
 pred_proper_species <- pred_proper %>%
@@ -322,12 +364,12 @@ pred_proper_species %>%
   scale_color_manual(values = pal) +
   theme_bw() +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.x  = element_text(angle = 45, hjust = 1),
     legend.position = "none"
   )
 ```
 
-## Pairwise contrasts between species
+## 7d. Pairwise contrasts between species
 
 ```{r}
 pred_proper_species %>%

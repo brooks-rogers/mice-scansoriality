@@ -246,7 +246,8 @@ for (i in var_complete_ratio) {
     newdata = dat,
     cores   = 4,
     seed    = 145,
-    refresh = 0
+    refresh = 0,
+    silent = 2
   )
 }
 ```
@@ -259,6 +260,13 @@ for (i in var_complete_ratio) {
 list_b_lm    %>% write_rds(here("Data", "B_lm_mods_FL_scores.Rds"))
 list_b_ratio %>% write_rds(here("Data", "B_ratio_mods_FL_scores.Rds"))
 ```
+
+Read Models
+```{r}
+list_b_lm    <- read_rds(here("Data", "B_lm_mods_FL_scores.Rds"))
+list_b_ratio <- read_rds(here("Data", "B_ratio_mods_FL_scores.Rds"))
+```
+
 
 ---
 
@@ -298,7 +306,7 @@ pred_all <- map_dfr(names(all_mods), function(var_name) {
         newdata    = model_dat,
         resp       = "Locbin",
         value      = "Prob_of_Climbing",
-        re_formula = NULL
+        re_formula = ~(1|gr(Taxon_Upham_style, cov = A))
       ) %>%
       as.data.frame() %>%
       group_by(Genus_species, .draw) %>%
@@ -317,7 +325,7 @@ pred_all <- map_dfr(names(all_mods), function(var_name) {
 ## 5c. Plot function
 
 ```{r}
-var_acc  <- c(names(list_b_lm), names(list_b_ratio))
+var_acc  <- var_accurate[var_accurate %in% c(names(list_b_lm), names(list_b_ratio))]
 n_shades <- floor(length(var_acc) / 2)
 
 shades <- data.frame(
@@ -329,7 +337,8 @@ shades <- data.frame(
 
 hplot <- function(groups) {
   pred_all %>%
-    filter(Genus_species %in% groups) %>%
+    filter(Genus_species %in% groups,
+           var %in% var_accurate) %>%
     mutate(
       var           = as.factor(var),
       Genus_species = gsub("_", " ", Genus_species)
