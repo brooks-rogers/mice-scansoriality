@@ -183,7 +183,8 @@ pred_fixef <- get_pred_species(NA, "Fixed_only")
 
 # Combine all methods
 pred_all_methods <- bind_rows(pred_full, pred_species_only, pred_phylo_only, pred_fixef) %>%
-  mutate(method = factor(method, levels = c("Full", "Species_RE", "Phylo_only", "Fixed_only")))
+  mutate(method = factor(method, levels = c("Full", "Species_RE", "Phylo_only", "Fixed_only"))) |> 
+  write_csv(here("Data", "predictions_all_methods.csv"))
 ```
 
 ---

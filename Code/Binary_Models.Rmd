@@ -385,7 +385,7 @@ pred_all <- map_dfr(names(all_mods), function(var_name) {
         resp             = "yforbrms",
         value            = "Prob_of_Climbing",
         allow_new_levels = TRUE,
-        re_formula       = NULL
+        re_formula       = NA
       ) %>%
       as.data.frame() %>%
       group_by(Genus_species, .draw) %>%
@@ -399,6 +399,8 @@ pred_all <- map_dfr(names(all_mods), function(var_name) {
     return(NULL)
   })
 })
+
+pred_all |> write_csv(here("Data", "predictions_individual.csv"))
 ```
 
 ## 6c. Plot function
@@ -455,6 +457,7 @@ hplot <- function(groups) {
     ) +
     guides(shape = guide_legend(override.aes = list(size = 8)))
 }
+
 ```
 
 
@@ -464,3 +467,89 @@ hplot(mice)
 
 ggsave(here("Plots", "Bin_Individual_Plots.pdf"), height = 8, width = 13)
 ```
+
+# 7 Plots
+
+Plotting all the measurments and the 
+```{r}
+preds <- read_csv(here("Data", "predictions_all_methods.csv")) |> 
+  filter(method == "Fixed_only") |> 
+  select(!method) |> 
+  mutate(var = "multi") |> 
+  bind_rows(read_csv(here("Data", "predictions_individual.csv")))
+```
+
+```{r plots}
+var_acc <- c("PES", "MANUS", "Ppl", "Hl", "OLI", "HPI", "Rl", "Uol", "Fl", "Ul", "multi")
+n_shades <- floor(length(var_acc) / 2)
+
+shades <- data.frame(
+  ymin = seq(1.5, by = 2, length.out = n_shades),
+  ymax = seq(2.5, by = 2, length.out = n_shades),
+  xmin = -Inf,
+  xmax = Inf
+)
+
+preds %>%
+  filter(Genus_species %in% mice,
+         var %in% var_acc) %>%
+  mutate(
+    var           = as.factor(var),
+    Genus_species = gsub("_", " ", Genus_species)
+  ) %>%
+  mutate(
+  Genus_species = case_when(
+    Genus_species == "Podomys floridanus"     ~ "Podomys\nfloridanus",
+    Genus_species == "Ochrotomys nuttalli"    ~ "Ochrotomys\nnuttalli",
+    Genus_species == "Peromyscus gossypinus"  ~ "Peromyscus\ngossypinus",
+    Genus_species == "Peromyscus polionotus"  ~ "Peromyscus\npolionotus",
+    TRUE ~ Genus_species
+  )
+) |> 
+  ggplot(aes(
+    x     = Prob_of_Climbing,
+    y     = fct_relevel(var, var_acc),
+    shape = Genus_species
+  )) +
+  geom_rect(
+    inherit.aes = FALSE,
+    data        = shades,
+    mapping     = aes(ymin = ymin, ymax = ymax, xmin = xmin, xmax = xmax),
+    alpha       = 0.125
+  ) +
+  geom_vline(xintercept = 0.5, linetype = 2, linewidth = 0.35, color = "grey30") +
+  stat_pointinterval(
+    .width    = 0.8,
+    color     = "grey15",
+    linewidth = 1.7,
+    position  = position_dodge(width = -0.8)
+  ) +
+  scale_x_continuous(limits = c(0, 1), expand = c(0.02, 0.02)) +
+  scale_y_discrete(labels = c(
+  "HPI"   = "Proximal Humerus\nRatio",
+  "PES"   = "Pes Digit Ratio",
+  "MANUS" = "Manus Digit Ratio",
+  "OLI"   = "Olecranon Ratio",
+  "Ppl"   = "Manus Phalanx\nLength",
+  "Hl"    = "Humerus Length",
+  "Rl"    = "Radius Length",
+  "Uol"   = "Olecranon Length",
+  "Ul"    = "Ulna Length",
+  "Fl"    = "Femur Length",
+  "multi" = "Multiple Regression"
+  # etc.
+)) +
+  scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
+  labs(y = "", x = "Probability of Climbing") +
+  theme_pander(gM = FALSE) +
+  theme(
+    axis.text.y  = element_text(angle = 0, hjust = 1),
+    panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+    legend.text  = element_text(face = "italic"),
+    legend.title = element_blank()
+  ) +
+  guides(shape = guide_legend(override.aes = list(size = 8)))
+
+ggsave(here("Plots", "Probability_Plot_All.pdf"), height = 11, width = 7)
+```
+
