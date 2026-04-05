@@ -24,7 +24,7 @@ or size-correction step needed.
 
 ```{r message = FALSE, warning=FALSE, include = FALSE}
 pacman::p_load(tidyverse, brms, cmdstanr, here, tidybayes, 
-               patchwork, glue, ggthemes)
+               patchwork, glue, ggthemes, ggtext)
 
 options(brms.backend = "cmdstanr")
 
@@ -404,6 +404,7 @@ contrasts <- post_means %>%
   )
 ```
 
+## 5a. Contrast plots
 
 ```{r}
 pairs <- combn(unique(post_means$Genus_species), 2, simplify = FALSE)
@@ -425,10 +426,45 @@ diffs_all %>%
   stat_pointinterval(.width = 0.89) +
   facet_wrap(~ var, nrow = 5, scales = "free_x") +
   labs(x = "Posterior difference", y = "") +
+  scale_x_continuous(breaks = scales::breaks_pretty(n = 4)) +
   theme_bw() +
   theme(strip.background = element_blank(),
-        panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7))
+        panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+        axis.text.x = element_text(size = 5.7))
 
 ggsave(here("Plots", "contrasts.pdf"), height = 10, width = 5)
 ```
 
+
+Contrasts 2 row
+
+```{r}
+# Mapping from current string patterns to markdown italic labels
+comparison_labels <- c(
+  "floridanus vs nuttalli"   = "*Po.* *floridanus* vs *O.* *nuttalli*",
+  "floridanus vs gossypinus" = "*Po.* *floridanus* vs *Pe.* *gossypinus*",
+  "floridanus vs polionotus" = "*Po.* *floridanus* vs *Pe.* *polionotus*",
+  "gossypinus vs nuttalli"   = "*Pe.* *gossypinus* vs *O.* *nuttalli*",
+  "gossypinus vs polionotus" = "*Pe.* *gossypinus* vs *Pe.* *polionotus*",
+  "nuttalli vs polionotus"   = "*O.* *nuttalli* vs *Pe.* *polionotus*"
+)
+
+diffs_all %>%
+  mutate(comparison = comparison_labels[comparison]) %>%
+  ggplot(aes(x = diff, y = comparison)) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  stat_pointinterval(.width = 0.89) +
+  facet_wrap(~ var, nrow = 2, scales = "free_x") +
+  labs(x = "Posterior difference", y = "") +
+  scale_x_continuous(breaks = scales::breaks_pretty(n = 4)) +
+  scale_y_discrete(labels = \(x) x) +  # identity; markdown handled below
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+        axis.text.x = element_text(size = 5.7),
+        axis.text.y = element_markdown())  # <-- key line
+
+
+ggsave(here("Plots", "contrasts_wide.pdf"), height = 5, width = 10)
+ggsave(here("Plots", "contrasts_wide.png"), height = 5, width = 10)
+```

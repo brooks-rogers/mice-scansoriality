@@ -33,7 +33,9 @@ here()
 
 ```{r}
 # Load cleaned data (wrangling done in Code/Data_Load.Rmd)
-dat <- read_csv(here("Data", "Clean_Data.csv"))
+dat <- read_csv(here("Data", "Clean_Data.csv")) |> 
+  filter(Genus_species %in% c("Podomys_floridanus", "Ochrotomys_nuttalli",
+                              "Peromyscus_gossypinus", "Peromyscus_polionotus"))
 
 # Species in the dataset (needed to prune the phylogeny)
 spp_obs <- dat$Taxon_Upham_style %>% unique()
@@ -385,7 +387,7 @@ pred_all <- map_dfr(names(all_mods), function(var_name) {
         resp             = "yforbrms",
         value            = "Prob_of_Climbing",
         allow_new_levels = TRUE,
-        re_formula       = NA
+        re_formula       = ~(1|Genus_species)
       ) %>%
       as.data.frame() %>%
       group_by(Genus_species, .draw) %>%
@@ -685,4 +687,75 @@ preds %>%
 ggsave(here("Plots", "Probability_Plot_Multiple_Reg.pdf"), height = 2.5, width = 5)
 ```
 
+Climbing probability contrasts
+
+```{r}
+library(tidyr)
+library(stringr)
+var_acc <- c("PES", "MANUS", "Ppl", "Hl", "OLI", "HPI", "Rl", "Uol", "Fl", "Ul", "multi")
+n_shades <- floor(length(var_acc) / 2)
+# All pairwise species combos
+species_pairs <- combn(mice, 2, simplify = FALSE)
+
+contrasts_df <- map_dfr(species_pairs, function(pair) {
+  preds %>%
+    filter(Genus_species %in% pair, var %in% var_acc) %>%
+    pivot_wider(
+      id_cols     = c(.draw, var),
+      names_from  = Genus_species,
+      values_from = Prob_of_Climbing
+    ) %>%
+    mutate(
+      diff     = .[[pair[1]]] - .[[pair[2]]],
+      contrast = paste0(gsub("_", " ", pair[1]), " - ", gsub("_", " ", pair[2]))
+    ) %>%
+    select(.draw, var, contrast, diff)
+})
+
+contrasts_df %>%
+  mutate(var = factor(var, levels = var_acc)) %>%
+  ggplot(aes(
+    x     = diff,
+    y     = fct_relevel(var, var_acc),
+    shape = contrast
+  )) +
+  geom_rect(
+    inherit.aes = FALSE,
+    data        = shades,
+    mapping     = aes(ymin = ymin, ymax = ymax, xmin = xmin, xmax = xmax),
+    alpha       = 0.125
+  ) +
+  geom_vline(xintercept = 0, linetype = 2, linewidth = 0.35, color = "grey30") +
+  stat_pointinterval(
+    .width    = 0.9,
+    color     = "grey15",
+    size      = 7,
+    linewidth = 1.7,
+    position  = position_dodge(width = -0.8)
+  ) +
+  scale_shape_manual(values = c(1, 15, 17, 19, 8, 2, 0, 5, 6, 18)) +
+  scale_y_discrete(labels = c(
+    "HPI"   = "Proximal Humerus\nRratio",
+    "PES"   = "Pes Digit Ratio",
+    "MANUS" = "Manus Digit Ratio",
+    "OLI"   = "Olecranon Ratio",
+    "Ppl"   = "Manus Phalanx\nLength",
+    "Hl"    = "Humerus Length",
+    "Rl"    = "Radius Length",
+    "Uol"   = "Olecranon Length",
+    "Ul"    = "Ulna Length",
+    "Fl"    = "Femur Length"
+  )) +
+  labs(y = "", x = "Contrast (Difference in P(Climbing))") +
+  theme_pander(gM = FALSE) +
+  theme(
+    axis.text.y  = element_text(angle = 0, hjust = 1),
+    panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
+    legend.text  = element_text(face = "italic"),
+    legend.title = element_blank()
+  ) +
+  guides(shape = guide_legend(override.aes = list(size = 8)))
+
+ggsave(here("Plots", "Probability_Contrasts_All.pdf"), height = 10, width = 9)
+```
 
