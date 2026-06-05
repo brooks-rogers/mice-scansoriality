@@ -364,7 +364,7 @@ hplot <- function(groups) {
     scale_y_continuous(limits = c(0, 1), expand = c(0.02, 0.02)) +
     scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
     labs(x = "", y = "Probability of Climbing") +
-    theme_pander(gM = FALSE) +
+    ggthemes::theme_pander(gM = FALSE) +
     theme(
       axis.text.x  = element_text(angle = 45, hjust = 1),
       panel.border = element_rect(colour = "grey40", fill = NA, linewidth = 0.7),
