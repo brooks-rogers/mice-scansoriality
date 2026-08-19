@@ -420,7 +420,7 @@ diffs_all <- map_dfr(pairs, function(p) {
     select(var, .draw, diff, comparison)
 }) %>%
   mutate(comparison = str_replace_all(comparison, 
-                                      "Peromyscus_|Ochrotomys_|Podomys_", ""))
+                                      "Peromyscus_|Ochrotomys_|Podomys_|Onychomys_", ""))
 
 diffs_all %>%
   ggplot(aes(x = diff, y = comparison)) +
@@ -443,12 +443,16 @@ Contrasts 2 row
 ```{r}
 # Mapping from current string patterns to markdown italic labels
 comparison_labels <- c(
-  "floridanus vs nuttalli"   = "*Po.* *floridanus* vs *O.* *nuttalli*",
-  "floridanus vs gossypinus" = "*Po.* *floridanus* vs *Pe.* *gossypinus*",
-  "floridanus vs polionotus" = "*Po.* *floridanus* vs *Pe.* *polionotus*",
+  "nuttalli vs floridanus"   = "*O.* *nuttalli* vs *Po.* *floridanus*",
+  "gossypinus vs floridanus" = "*Pe.* *gossypinus* vs *Po.* *floridanus*",
+  "polionotus vs floridanus" = "*Pe.* *polionotus* vs *Po.* *floridanus*",
   "gossypinus vs polionotus" = "*Pe.* *gossypinus* vs *Pe.* *polionotus*",
   "nuttalli vs gossypinus"   = "*O.* *nuttalli* vs *Pe.* *gossypinus*",  # <-- add
-  "nuttalli vs polionotus"   = "*O.* *nuttalli* vs *Pe.* *polionotus*"
+  "nuttalli vs polionotus"   = "*O.* *nuttalli* vs *Pe.* *polionotus*",
+  "gossypinus vs leucogaster"= "*Pe.* *gossypinus* vs *On.* *leucogaster*",
+  "polionotus vs leucogaster"= "*Pe.* *polionotus* vs *On.* *leucogaster*",
+  "nuttalli vs leucogaster"  = "*O.* *nuttalli* vs *On.* *leucogaster*",
+  "floridanus vs leucogaster"= "*Po.* *floridanus* vs *On.* *leucogaster*"
 )
 diffs_all %>%
   mutate(comparison = comparison_labels[comparison]) %>%
