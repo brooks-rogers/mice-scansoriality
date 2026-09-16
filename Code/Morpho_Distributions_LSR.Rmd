@@ -30,6 +30,8 @@ options(brms.backend = "cmdstanr")
 
 here::i_am("README.md")
 here()
+
+scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
 ```
 
 ```{r}
@@ -111,7 +113,7 @@ reference-level contrast. This makes posterior extraction straightforward.
 
 ```{r}
 p <- c(
-  prior(normal(0, 2),   class = b, dpar = ""),
+  prior(normal(0, 2),   class = b, dpar = "", coef ="Genus_speciesOchrotomys_nuttali"),
   prior(normal(0, 0.5), class = b, dpar = "sigma")
 )
 
@@ -456,6 +458,14 @@ comparison_labels <- c(
 )
 diffs_all %>%
   mutate(comparison = comparison_labels[comparison]) %>%
+  filter(var %in% c("MANUS", "PES", "lsFl", "OLI", "HPI", "lsUol")) |> 
+  mutate(var = case_match(
+    var,
+    "lsFl" ~ "lsr(Femur Length)",
+    "lsUol" ~ "lsr(Olecranon Length)",
+    .default = var)) |>  
+  mutate(var = factor(var, levels = c("MANUS", "OLI", "HPI",
+                                                "PES", "lsr(Olecranon Length)", "lsr(Femur Length)"))) |> # Keeps any other values unchanged
   ggplot(aes(x = diff, y = comparison)) +
   geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
   stat_pointinterval(.width = 0.89) +
