@@ -32,11 +32,13 @@ here::i_am("README.md")
 here()
 
 scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+mice=c("Onychomys_leucogaster", "Ochrotomys_nuttalli", "Peromyscus_gossypinus","Peromyscus_polionotus","Podomys_floridanus")
 ```
 
 ```{r}
 dat <- read_csv(here("Data", "MouseMeasurements.csv")) |> 
-  mutate(Genus_species = str_remove_all(Genus_species, " ")) |> 
+  mutate(genus_species = str_remove_all(genus_species, " ")) |> 
   select(catalog:Pppl) |> 
   mutate(
     MANUS = Ppl/Mcl,
@@ -51,7 +53,9 @@ dat <- read_csv(here("Data", "MouseMeasurements.csv")) |>
     FEB   = Fdw/Fl,
     CI    = Tl/Fl,
     TRI   = Tmw/Tl,
-    PES   = Pppl/Mtl
+    PES   = Pppl/Mtl,
+    TAIL  = Tail/TotL,
+    HIND  = Hindfoot/(TotL-Tail)
   ) |> 
   mutate(gm = (Hl * Fl * Ul * Rl) ^ (1/4),
          HBL = TotL - Tail) |> 
@@ -67,17 +71,20 @@ dat <- read_csv(here("Data", "MouseMeasurements.csv")) |>
     lsFl   = log(Fl   / gm),
     lsFsw  = log(Fsw  / gm),
     lsFdw  = log(Fdw  / gm),
-    lsTmw  = log(Tl   / gm),
+    lsTmw  = log(Tmw   / gm),
     lsPppl = log(Pppl / gm),
     lsMtl  = log(Mtl  / gm),
-    lsPpl  = log(Ppl  / gm)
+    lsPpl  = log(Ppl  / gm),
+    lsTl   = log(Tl   / gm)
   ) |> 
   #mutate_at(vars(Fl:Pppl), log) |>
   mutate(pred_data = "T") |> 
   select(!Usw) |>
   filter(catalog != "U20988*") |> 
-  mutate(Genus_species = factor(Genus_species, levels = mice)) |> 
-  mutate_at(vars(Fl:lsPpl), scale2)
+  mutate(genus_species = factor(genus_species, levels = mice)) |> 
+  mutate_at(vars(Fl:lsTl), scale2) 
+
+
 ```
 
 ```{r}
@@ -85,10 +92,10 @@ dat <- read_csv(here("Data", "MouseMeasurements.csv")) |>
 var_accurate <- read_rds(here("Data", "var_accurate.Rds"))
 
 # Log-shape ratio versions of formerly size-controlled variables
-vars_lsr <- c("lsPpl", "lsHl", "lsRl", "lsUol", "lsFl", "lsUl")
+vars_lsr <- c("lsPpl", "lsHl", "lsRl", "lsUol", "lsFl", "lsUl", "lsTl")
 
 # Dimensionless indices — unchanged
-vars_idx <- c("HPI", "PES", "MANUS", "OLI")
+vars_idx <- c("HPI", "PES", "MANUS", "OLI", "HIND", "TAIL", "IM")
 
 # Combined variable set for modeling
 vars_all <- c(vars_lsr, vars_idx)
@@ -107,13 +114,13 @@ pal <- c('#62361B', '#f48a1a', '#e6ab02', '#66a61e', '#31c1bb',
 # 2. Fit Models
 
 Single distributional regression framework for all variables.
-`mu` and `sigma` both vary by species. Using `0 + Genus_species` suppresses
+`mu` and `sigma` both vary by species. Using `0 + genus_species` suppresses
 the intercept so each species gets its own coefficient directly — no
 reference-level contrast. This makes posterior extraction straightforward.
 
 ```{r}
 p <- c(
-  prior(normal(0, 2),   class = b, dpar = "", coef ="Genus_speciesOchrotomys_nuttali"),
+  prior(normal(0, 2),   class = b, dpar = "", coef ="genus_speciesOchrotomys_nuttalli"), #coef="genus_speciesOchrotomys_nuttalli", why?
   prior(normal(0, 0.5), class = b, dpar = "sigma")
 )
 
@@ -121,7 +128,7 @@ dist_mods <- vector(mode = "list")
 
 # Compile initial model — update() reuses this Stan executable for all variables
 mm <- brm(
-  bf(HPI ~ 0 + Genus_species, sigma ~ 0 + Genus_species),
+  bf(HPI ~ 0 + genus_species, sigma ~ 0 + genus_species),
   data    = dat,
   family  = gaussian(),
   prior   = p,
@@ -142,8 +149,8 @@ for (i in vars_all) {
   dist_mods[[i]] <- update(
     mm,
     formula = bf(
-      as.formula(paste0(i, " ~ 0 + Genus_species")),
-      as.formula("sigma ~ 0 + Genus_species")
+      as.formula(paste0(i, " ~ 0 + genus_species")),
+      as.formula("sigma ~ 0 + genus_species")
     ),
     newdata = dat,
     cores   = 4,
@@ -162,7 +169,7 @@ dist_mods %>% write_rds(here("Data", "dist_mods.Rds"))
 
 # 3. Extract Posterior Draws
 
-With `0 + Genus_species` parameterization, each species has its own named
+With `0 + genus_species` parameterization, each species has its own named
 coefficient. We extract these directly using `spread_draws()` — no prediction
 step needed.
 
@@ -173,8 +180,8 @@ post_all <- map_dfr(names(dist_mods), function(var_name) {
   if (is.null(mod)) return(NULL)
   
   newdata <- dat %>% 
-    distinct(Genus_species) %>% 
-    filter(!is.na(Genus_species))
+    distinct(genus_species) %>% 
+    filter(!is.na(genus_species))
   
   tryCatch({
     mod %>%
@@ -182,7 +189,7 @@ post_all <- map_dfr(names(dist_mods), function(var_name) {
       as.data.frame() %>%
       rename(value = .prediction) %>%
       mutate(var = var_name) %>%
-      select(.draw, Genus_species, value, var)
+      select(.draw, genus_species, value, var)
   }, error = function(e) {
     warning(glue("Draw extraction failed for {var_name}: {e$message}"))
     return(NULL)
@@ -196,9 +203,9 @@ post_all <- map_dfr(names(dist_mods), function(var_name) {
 
 ```{r}
 post_all %>%
-  group_by(var, Genus_species) %>%
+  group_by(var, genus_species) %>%
   summarise(mean = mean(value), .groups = "drop") %>%
-  pivot_wider(names_from = Genus_species, values_from = mean) %>%
+  pivot_wider(names_from = genus_species, values_from = mean) %>%
   mutate(Ochrotomys_diff = Ochrotomys_nuttalli - rowMeans(across(c(Podomys_floridanus, 
                                                                     Peromyscus_gossypinus, 
                                                                     Peromyscus_polionotus))))
@@ -222,9 +229,9 @@ shades <- data.frame(
   ymax = Inf
 )
 
-# Raw data in long format for jittered points
+# Raw data in long format for jittered points <- what does this mean?
 dat_long <- dat %>%
-  select(Genus_species, catalog, all_of(var_plot_order)) %>%
+  select(genus_species, catalog, all_of(var_plot_order)) %>%
   pivot_longer(
     cols      = all_of(var_plot_order),
     names_to  = "var",
@@ -234,7 +241,7 @@ dat_long <- dat %>%
   group_by(var) %>%
   mutate(value = scale(value)[, 1]) %>%
   ungroup() %>%
-  mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+  mutate(genus_species = gsub("_", " ", as.character(genus_species)))
 ```
 
 
@@ -243,17 +250,17 @@ dat_long <- dat %>%
 morpho_plot <- function(groups) {
   
   ppred_plot <- post_all %>%
-    filter(Genus_species %in% groups) %>%
-    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+    filter(genus_species %in% groups) %>%
+    mutate(genus_species = gsub("_", " ", as.character(genus_species)))
   
   raw_plot <- dat_long %>%
-    filter(gsub(" ", "_", Genus_species) %in% groups)
+    filter(gsub(" ", "_", genus_species) %in% groups)
   
   ppred_plot %>%
     ggplot(aes(
       x     = fct_relevel(var, var_plot_order),
       y     = value,
-      shape = Genus_species
+      shape = genus_species
     )) +
     geom_rect(
       inherit.aes = FALSE,
@@ -270,7 +277,7 @@ morpho_plot <- function(groups) {
     geom_point(
       data    = raw_plot,
       mapping = aes(x = fct_relevel(var, var_plot_order), y = value,
-                    shape = Genus_species),
+                    shape = genus_species),
       position = position_jitterdodge(dodge.width = 0.5, jitter.width = 0.1,
                                       jitter.height = 0),
       size  = 1.5,
@@ -292,14 +299,14 @@ morpho_plot <- function(groups) {
 morpho_plot_clean <- function(groups) {
   
   ppred_plot <- post_all %>%
-    filter(Genus_species %in% groups) %>%
-    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+    filter(genus_species %in% groups) %>%
+    mutate(genus_species = gsub("_", " ", as.character(genus_species)))
   
   ppred_plot %>%
     ggplot(aes(
       x     = fct_relevel(var, var_plot_order),
       y     = value,
-      shape = Genus_species
+      shape = genus_species
     )) +
     geom_rect(
       inherit.aes = FALSE,
@@ -340,17 +347,17 @@ ggsave(here("Plots", "Morpho_Distributions_no_points.pdf"), height = 8, width = 
 morpho_plot_byvar <- function(groups) {
   
   ppred_plot <- post_all %>%
-    filter(Genus_species %in% groups) %>%
-    mutate(Genus_species = gsub("_", " ", as.character(Genus_species)))
+    filter(genus_species %in% groups) %>%
+    mutate(genus_species = gsub("_", " ", as.character(genus_species)))
   
   raw_plot <- dat_long %>%
-    filter(gsub(" ", "_", Genus_species) %in% groups)
+    filter(gsub(" ", "_", genus_species) %in% groups)
   
   ppred_plot %>%
     ggplot(aes(
-      x     = Genus_species,
+      x     = genus_species,
       y     = value,
-      shape = Genus_species
+      shape = genus_species
     )) +
     stat_pointinterval(
       .width    = 0.8,
@@ -360,7 +367,7 @@ morpho_plot_byvar <- function(groups) {
     ) +
     geom_hline( yintercept = 0, linetype = 2) +
     scale_shape_manual(values = c(1, 15, 17, 19, 8)) +
-    facet_wrap(~ var, scales = "free_y", nrow = 2) +
+    facet_wrap(~ var, scales = "free_y", nrow = 2) +   #Alter n row here
     labs(x = "", y = "Z-score") +
     theme_pander(gM = FALSE) +
     theme(
@@ -380,29 +387,30 @@ ggsave(here("Plots", "Morpho_Distributions_byvar.pdf"), height = 8, width = 13)
 ```{r}
 post_means <- map_dfr(names(dist_mods), function(var_name) {
   dist_mods[[var_name]] %>%
-    spread_draws(`b_Genus_species.*`, regex = TRUE) %>%
+    spread_draws(`b_genus_species.*`, regex = TRUE) %>%
     pivot_longer(
-      starts_with("b_Genus_species"),
-      names_to  = "Genus_species",
+      starts_with("b_genus_species"),
+      names_to  = "genus_species",
       values_to = "value"
     ) %>%
     mutate(
-      Genus_species = str_remove(Genus_species, "b_Genus_species"),
+      genus_species = str_remove(genus_species, "b_genus_species"),
       var           = var_name
     ) %>%
-    select(.draw, Genus_species, value, var)
+    select(.draw, genus_species, value, var)
 })
 
 contrasts <- post_means %>%
-  pivot_wider(names_from = Genus_species, values_from = value) %>%
+  pivot_wider(names_from = genus_species, values_from = value) %>%
   group_by(var) %>%
   summarise(
     vs_Podomys    = mean(Ochrotomys_nuttalli > Podomys_floridanus),
     vs_gossypinus = mean(Ochrotomys_nuttalli > Peromyscus_gossypinus),
-    vs_polionotus = mean(Ochrotomys_nuttalli > Peromyscus_polionotus)
+    vs_polionotus = mean(Ochrotomys_nuttalli > Peromyscus_polionotus),
+    vs_Onychomys  = mean(Ochrotomys_nuttalli > Onychomys_leucogaster)
   ) %>%
   mutate(
-    predicted_higher = var %in% c("MANUS", "PES", "lsHl", "lsPpl", "lsRl", "lsUl"),
+    predicted_higher = var %in% c("MANUS", "PES", "lsHl", "lsPpl", "lsRl", "lsUl"),     #What does all of this mean?
     across(starts_with("vs_"), ~ if_else(predicted_higher, .x, 1 - .x),
            .names = "{.col}_directional")
   )
@@ -411,12 +419,12 @@ contrasts <- post_means %>%
 ## 5a. Contrast plots
 
 ```{r}
-pairs <- combn(unique(post_means$Genus_species), 2, simplify = FALSE)
+pairs <- combn(unique(post_means$genus_species), 2, simplify = FALSE)
 
 diffs_all <- map_dfr(pairs, function(p) {
   post_means %>%
-    filter(Genus_species %in% p) %>%
-    pivot_wider(names_from = Genus_species, values_from = value) %>%
+    filter(genus_species %in% p) %>%
+    pivot_wider(names_from = genus_species, values_from = value) %>%
     mutate(diff = .data[[p[1]]] - .data[[p[2]]],
            comparison = paste(p[1], "vs", p[2])) %>%
     select(var, .draw, diff, comparison)
